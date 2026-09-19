@@ -94,7 +94,8 @@ class NvidiaClient(
             .post(payload.toString().toRequestBody(JSON.toMediaType()))
             .build()
 
-        http.newCall(request).execute().use { response ->
+        val response = http.newCall(request).execute()
+        try {
             if (!response.isSuccessful) {
                 throw providerException(response.code, response.body?.string().orEmpty())
             }
@@ -102,16 +103,21 @@ class NvidiaClient(
             val source = response.body?.byteStream()?.bufferedReader()
                 ?: throw ProviderException("NVIDIA", "NVIDIA returned an empty response.")
 
-            source.useLines { lines ->
-                lines.forEach { line ->
-                    if (!line.startsWith("data:")) return@forEach
+            try {
+                while (true) {
+                    val line = source.readLine() ?: break
+                    if (!line.startsWith("data:")) continue
                     val data = line.removePrefix("data:").trim()
-                    if (data.isBlank() || data == "[DONE]") return@forEach
+                    if (data.isBlank() || data == "[DONE]") continue
 
-                    val json = runCatching { JSONObject(data) }.getOrNull() ?: return@forEach
+                    val json = runCatching { JSONObject(data) }.getOrNull() ?: continue
                     parseStreamEvent(json)?.let { emit(it) }
                 }
+            } finally {
+                source.close()
             }
+        } finally {
+            response.close()
         }
     }.flowOn(Dispatchers.IO)
 

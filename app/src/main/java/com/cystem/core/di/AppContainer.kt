@@ -6,11 +6,22 @@ import com.cystem.core.security.SecureKeyStore
 import com.cystem.core.settings.SettingsStore
 import com.cystem.core.storage.ConversationRepository
 import com.cystem.core.storage.CystemDatabase
+import com.cystem.core.tools.PhoneActionDispatcher
+import com.cystem.core.tools.PhoneToolRegistry
+import com.cystem.core.tools.ToolExecutor
 
 class AppContainer(context: Context) {
     val secureKeyStore = SecureKeyStore(context)
     val settingsStore = SettingsStore(context, secureKeyStore)
     val database = CystemDatabase(context)
     val conversations = ConversationRepository(database)
+
+    val phoneActionDispatcher = PhoneActionDispatcher()
+    val phoneTools = PhoneToolRegistry(context.applicationContext, phoneActionDispatcher)
+    val toolExecutor = ToolExecutor(
+        registry = phoneTools.registry,
+        enabledNames = { settingsStore.readEnabledPhoneTools() },
+    )
+
     val coordinator = RequestCoordinator(this)
 }

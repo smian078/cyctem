@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -42,6 +44,7 @@ class CystemViewModel(
 ) : ViewModel() {
     private val mutable = MutableStateFlow(CystemUiState())
     val uiState: StateFlow<CystemUiState> = mutable.asStateFlow()
+    private var activeGenerationJob: Job? = null
 
     init {
         refreshConversations()
@@ -161,6 +164,22 @@ class CystemViewModel(
         if (text.isBlank() || mutable.value.processing) return
         mutable.value = mutable.value.copy(draft = "")
         ensureConversationThen { id -> sendToCoordinator(id, text) }
+    }
+
+    fun stopGeneration() {
+        val job = activeGenerationJob ?: return
+        job.cancel()
+        activeGenerationJob = null
+        val active = mutable.value.activeConversationId
+        viewModelScope.launch {
+            val pair = active?.let { readMessages(it) }
+            mutable.value = mutable.value.copy(
+                processing = false,
+                stage = "Cancelled",
+                messages = pair?.first.orEmpty(),
+                messageAttachments = pair?.second.orEmpty(),
+            )
+        }
     }
 
     fun confirmTool(approved: Boolean) {

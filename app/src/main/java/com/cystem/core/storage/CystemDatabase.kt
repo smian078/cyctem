@@ -347,6 +347,281 @@ class ConversationRepository(private val database: CystemDatabase) {
         return result
     }
 
+    fun exportJson(): String {
+        return database.transaction { db ->
+            val root = org.json.JSONObject()
+            root.put("version", 1)
+
+            val conversations = org.json.JSONArray()
+            db.query(
+                "conversations",
+                null,
+                null,
+                null,
+                null,
+                null,
+                "updated_at ASC",
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    conversations.put(
+                        org.json.JSONObject()
+                            .put("id", cursor.getString(cursor.getColumnIndexOrThrow("id")))
+                            .put("title", cursor.getString(cursor.getColumnIndexOrThrow("title")))
+                            .put("created_at", cursor.getLong(cursor.getColumnIndexOrThrow("created_at")))
+                            .put("updated_at", cursor.getLong(cursor.getColumnIndexOrThrow("updated_at")))
+                            .put("pinned", cursor.getInt(cursor.getColumnIndexOrThrow("pinned")) != 0),
+                    )
+                }
+            }
+
+            val messages = org.json.JSONArray()
+            db.query(
+                "messages",
+                null,
+                null,
+                null,
+                null,
+                null,
+                "created_at ASC",
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    messages.put(
+                        org.json.JSONObject()
+                            .put("id", cursor.getString(cursor.getColumnIndexOrThrow("id")))
+                            .put("conversation_id", cursor.getString(cursor.getColumnIndexOrThrow("conversation_id")))
+                            .put("role", cursor.getString(cursor.getColumnIndexOrThrow("role")))
+                            .put("content", cursor.getString(cursor.getColumnIndexOrThrow("content")))
+                            .put("created_at", cursor.getLong(cursor.getColumnIndexOrThrow("created_at")))
+                            .put("reasoning", cursor.getStringOrNull("reasoning"))
+                            .put("status", cursor.getString(cursor.getColumnIndexOrThrow("status")))
+                            .put("model", cursor.getStringOrNull("model"))
+                            .put("response_id", cursor.getStringOrNull("response_id"))
+                            .put("input_tokens", cursor.getLongOrNull("input_tokens"))
+                            .put("output_tokens", cursor.getLongOrNull("output_tokens"))
+                            .put("latency_ms", cursor.getLongOrNull("latency_ms")),
+                    )
+                }
+            }
+
+            val attachments = org.json.JSONArray()
+            db.query("attachments", null, null, null, null, null, "rowid ASC").use { cursor ->
+                while (cursor.moveToNext()) {
+                    attachments.put(
+                        org.json.JSONObject()
+                            .put("id", cursor.getString(cursor.getColumnIndexOrThrow("id")))
+                            .put("local_path", cursor.getString(cursor.getColumnIndexOrThrow("local_path")))
+                            .put("mime_type", cursor.getString(cursor.getColumnIndexOrThrow("mime_type")))
+                            .put("size_bytes", cursor.getLong(cursor.getColumnIndexOrThrow("size_bytes")))
+                            .put("width", cursor.getIntOrNull(cursor.getColumnIndexOrThrow("width")))
+                            .put("height", cursor.getIntOrNull(cursor.getColumnIndexOrThrow("height")))
+                            .put("source_url", cursor.getStringOrNull("source_url"))
+                            .put("source_title", cursor.getStringOrNull("source_title")),
+                    )
+                }
+            }
+
+            val messageAttachments = org.json.JSONArray()
+            db.rawQuery("SELECT message_id,attachment_id FROM message_attachments", null).use { cursor ->
+                while (cursor.moveToNext()) {
+                    messageAttachments.put(
+                        org.json.JSONObject()
+                            .put("message_id", cursor.getString(0))
+                            .put("attachment_id", cursor.getString(1)),
+                    )
+                }
+            }
+
+            val sources = org.json.JSONArray()
+            db.query("sources", null, null, null, null, null, "rowid ASC").use { cursor ->
+                while (cursor.moveToNext()) {
+                    sources.put(
+                        org.json.JSONObject()
+                            .put("id", cursor.getString(cursor.getColumnIndexOrThrow("id")))
+                            .put("message_id", cursor.getString(cursor.getColumnIndexOrThrow("message_id")))
+                            .put("title", cursor.getString(cursor.getColumnIndexOrThrow("title")))
+                            .put("url", cursor.getString(cursor.getColumnIndexOrThrow("url")))
+                            .put("date", cursor.getStringOrNull("date"))
+                            .put("snippet", cursor.getStringOrNull("snippet")),
+                    )
+                }
+            }
+
+            val toolCalls = org.json.JSONArray()
+            db.query("tool_calls", null, null, null, null, null, "created_at ASC").use { cursor ->
+                while (cursor.moveToNext()) {
+                    toolCalls.put(
+                        org.json.JSONObject()
+                            .put("id", cursor.getString(cursor.getColumnIndexOrThrow("id")))
+                            .put("message_id", cursor.getString(cursor.getColumnIndexOrThrow("message_id")))
+                            .put("name", cursor.getString(cursor.getColumnIndexOrThrow("name")))
+                            .put("arguments_json", cursor.getString(cursor.getColumnIndexOrThrow("arguments_json")))
+                            .put("result", cursor.getStringOrNull("result"))
+                            .put("status", cursor.getString(cursor.getColumnIndexOrThrow("status")))
+                            .put("created_at", cursor.getLong(cursor.getColumnIndexOrThrow("created_at")))
+                            .put("finished_at", cursor.getLongOrNull("finished_at")),
+                    )
+                }
+            }
+
+            val analysis = org.json.JSONArray()
+            db.query("attachment_analysis", null, null, null, null, null, "created_at ASC").use { cursor ->
+                while (cursor.moveToNext()) {
+                    analysis.put(
+                        org.json.JSONObject()
+                            .put("attachment_id", cursor.getString(cursor.getColumnIndexOrThrow("attachment_id")))
+                            .put("analysis", cursor.getString(cursor.getColumnIndexOrThrow("analysis")))
+                            .put("created_at", cursor.getLong(cursor.getColumnIndexOrThrow("created_at"))),
+                    )
+                }
+            }
+
+            root.put("conversations", conversations)
+            root.put("messages", messages)
+            root.put("attachments", attachments)
+            root.put("message_attachments", messageAttachments)
+            root.put("sources", sources)
+            root.put("tool_calls", toolCalls)
+            root.put("attachment_analysis", analysis)
+            root.toString()
+        }
+    }
+
+    fun importJson(json: String) {
+        val root = org.json.JSONObject(json)
+        require(root.optInt("version", -1) == 1) { "Unsupported CYSTEM backup version." }
+
+        database.transaction { db ->
+            db.delete("attachment_analysis", null, null)
+            db.delete("tool_calls", null, null)
+            db.delete("sources", null, null)
+            db.delete("message_attachments", null, null)
+            db.delete("attachments", null, null)
+            db.delete("messages", null, null)
+            db.delete("conversations", null, null)
+
+            val conversations = root.optJSONArray("conversations") ?: org.json.JSONArray()
+            for (index in 0 until conversations.length()) {
+                val item = conversations.getJSONObject(index)
+                db.insertOrThrow(
+                    "conversations",
+                    null,
+                    ContentValues().apply {
+                        put("id", item.getString("id"))
+                        put("title", item.getString("title"))
+                        put("created_at", item.getLong("created_at"))
+                        put("updated_at", item.getLong("updated_at"))
+                        put("pinned", if (item.optBoolean("pinned")) 1 else 0)
+                    },
+                )
+            }
+
+            val messages = root.optJSONArray("messages") ?: org.json.JSONArray()
+            for (index in 0 until messages.length()) {
+                val item = messages.getJSONObject(index)
+                db.insertOrThrow(
+                    "messages",
+                    null,
+                    ContentValues().apply {
+                        put("id", item.getString("id"))
+                        put("conversation_id", item.getString("conversation_id"))
+                        put("role", item.getString("role"))
+                        put("content", item.getString("content"))
+                        put("created_at", item.getLong("created_at"))
+                        item.optString("reasoning").takeIf { it.isNotBlank() }?.let { put("reasoning", it) }
+                        put("status", item.getString("status"))
+                        item.optString("model").takeIf { it.isNotBlank() }?.let { put("model", it) }
+                        item.optString("response_id").takeIf { it.isNotBlank() }?.let { put("response_id", it) }
+                        if (!item.isNull("input_tokens")) put("input_tokens", item.getLong("input_tokens"))
+                        if (!item.isNull("output_tokens")) put("output_tokens", item.getLong("output_tokens"))
+                        if (!item.isNull("latency_ms")) put("latency_ms", item.getLong("latency_ms"))
+                    },
+                )
+            }
+
+            val attachments = root.optJSONArray("attachments") ?: org.json.JSONArray()
+            for (index in 0 until attachments.length()) {
+                val item = attachments.getJSONObject(index)
+                db.insertOrThrow(
+                    "attachments",
+                    null,
+                    ContentValues().apply {
+                        put("id", item.getString("id"))
+                        put("local_path", item.getString("local_path"))
+                        put("mime_type", item.getString("mime_type"))
+                        put("size_bytes", item.getLong("size_bytes"))
+                        if (!item.isNull("width")) put("width", item.getInt("width"))
+                        if (!item.isNull("height")) put("height", item.getInt("height"))
+                        item.optString("source_url").takeIf { it.isNotBlank() }?.let { put("source_url", it) }
+                        item.optString("source_title").takeIf { it.isNotBlank() }?.let { put("source_title", it) }
+                    },
+                )
+            }
+
+            val links = root.optJSONArray("message_attachments") ?: org.json.JSONArray()
+            for (index in 0 until links.length()) {
+                val item = links.getJSONObject(index)
+                db.insertOrThrow(
+                    "message_attachments",
+                    null,
+                    ContentValues().apply {
+                        put("message_id", item.getString("message_id"))
+                        put("attachment_id", item.getString("attachment_id"))
+                    },
+                )
+            }
+
+            val sources = root.optJSONArray("sources") ?: org.json.JSONArray()
+            for (index in 0 until sources.length()) {
+                val item = sources.getJSONObject(index)
+                db.insertOrThrow(
+                    "sources",
+                    null,
+                    ContentValues().apply {
+                        put("id", item.getString("id"))
+                        put("message_id", item.getString("message_id"))
+                        put("title", item.getString("title"))
+                        put("url", item.getString("url"))
+                        item.optString("date").takeIf { it.isNotBlank() }?.let { put("date", it) }
+                        item.optString("snippet").takeIf { it.isNotBlank() }?.let { put("snippet", it) }
+                    },
+                )
+            }
+
+            val toolCalls = root.optJSONArray("tool_calls") ?: org.json.JSONArray()
+            for (index in 0 until toolCalls.length()) {
+                val item = toolCalls.getJSONObject(index)
+                db.insertOrThrow(
+                    "tool_calls",
+                    null,
+                    ContentValues().apply {
+                        put("id", item.getString("id"))
+                        put("message_id", item.getString("message_id"))
+                        put("name", item.getString("name"))
+                        put("arguments_json", item.getString("arguments_json"))
+                        item.optString("result").takeIf { it.isNotBlank() }?.let { put("result", it) }
+                        put("status", item.getString("status"))
+                        put("created_at", item.getLong("created_at"))
+                        if (!item.isNull("finished_at")) put("finished_at", item.getLong("finished_at"))
+                    },
+                )
+            }
+
+            val analysis = root.optJSONArray("attachment_analysis") ?: org.json.JSONArray()
+            for (index in 0 until analysis.length()) {
+                val item = analysis.getJSONObject(index)
+                db.insertOrThrow(
+                    "attachment_analysis",
+                    null,
+                    ContentValues().apply {
+                        put("attachment_id", item.getString("attachment_id"))
+                        put("analysis", item.getString("analysis"))
+                        put("created_at", item.getLong("created_at"))
+                    },
+                )
+            }
+        }
+    }
+
     fun insertToolCall(record: ToolCallRecord) {
         database.writable().insertOrThrow(
             "tool_calls",
@@ -390,4 +665,9 @@ object ConversationTitles {
         if (clean.isEmpty()) return "New system session"
         return clean.removePrefix("/").take(64).trim().ifEmpty { "New system session" }
     }
+}
+
+private fun Cursor.getStringOrNull(columnName: String): String? {
+    val index = getColumnIndexOrThrow(columnName)
+    return if (isNull(index)) null else getString(index)
 }

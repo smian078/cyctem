@@ -569,20 +569,23 @@ class RequestCoordinator(
 
         emit(PipelineEvent.Stage("Analyzing attachments"))
 
-        attachments.joinToString("\n") { attachment ->
+        val analyses = ArrayList<String>(attachments.size)
+        for (attachment in attachments) {
             val cached = container.conversations.findAttachmentAnalysis(attachment.id)
-            if (!cached.isNullOrBlank()) {
+            val analysis = if (!cached.isNullOrBlank()) {
                 cached
             } else {
-                val analysis = analyzeSingleAttachment(key, attachment)
+                val generated = analyzeSingleAttachment(key, attachment)
                 container.conversations.saveAttachmentAnalysis(
                     attachment.id,
-                    analysis,
+                    generated,
                     System.currentTimeMillis(),
                 )
-                analysis
+                generated
             }
+            analyses += analysis
         }
+        analyses.joinToString("\n")
     }
 
     private suspend fun analyzeSingleAttachment(

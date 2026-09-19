@@ -25,6 +25,7 @@ internal class CystemDbHelper(
         db.execSQL("CREATE TABLE message_attachments(message_id TEXT NOT NULL,attachment_id TEXT NOT NULL,PRIMARY KEY(message_id,attachment_id),FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,FOREIGN KEY(attachment_id) REFERENCES attachments(id) ON DELETE CASCADE)")
         db.execSQL("CREATE TABLE sources(id TEXT PRIMARY KEY NOT NULL,message_id TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,date TEXT,snippet TEXT,FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE)")
         db.execSQL("CREATE TABLE tool_calls(id TEXT PRIMARY KEY NOT NULL,message_id TEXT NOT NULL,name TEXT NOT NULL,arguments_json TEXT NOT NULL,result TEXT,status TEXT NOT NULL,created_at INTEGER NOT NULL,finished_at INTEGER,FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE)")
+        db.execSQL("CREATE TABLE attachment_analysis(attachment_id TEXT PRIMARY KEY NOT NULL,analysis TEXT NOT NULL,created_at INTEGER NOT NULL,FOREIGN KEY(attachment_id) REFERENCES attachments(id) ON DELETE CASCADE)")
         db.execSQL("CREATE INDEX idx_messages_conversation_created ON messages(conversation_id, created_at)")
         db.execSQL("CREATE INDEX idx_sources_message ON sources(message_id)")
         db.execSQL("CREATE INDEX idx_tools_message ON tool_calls(message_id)")
@@ -71,7 +72,6 @@ class CystemDatabase(context: Context) {
     }
 
     fun writable(): SQLiteDatabase = helper.writableDatabase
-
     fun close() = helper.close()
 
     private fun recoverFromCorruption() {
@@ -79,7 +79,7 @@ class CystemDatabase(context: Context) {
         val original = appContext.getDatabasePath("cystem.db")
         if (original.exists()) {
             original.renameTo(
-                File(original.parentFile, "cystem-corrupt-${System.currentTimeMillis()}.db"),
+                File(original.parentFile, "cystem-corrupt-" + System.currentTimeMillis() + ".db"),
             )
         }
         helper = CystemDbHelper(appContext)
@@ -157,7 +157,9 @@ class ConversationRepository(private val database: CystemDatabase) {
     }
 
     fun deleteConversation(id: String) {
-        database.transaction { db -> db.delete("conversations", "id = ?", arrayOf(id)) }
+        database.transaction { db ->
+            db.delete("conversations", "id = ?", arrayOf(id))
+        }
     }
 
     fun insertMessage(message: Message) {
@@ -272,6 +274,17 @@ class ConversationRepository(private val database: CystemDatabase) {
         )
     }
 
+    fun attachToMessage(messageId: String, attachmentId: String) {
+        database.writable().insertOrThrow(
+            "message_attachments",
+            null,
+            ContentValues().apply {
+                put("message_id", messageId)
+                put("attachment_id", attachmentId)
+            },
+        )
+    }
+
     fun listConversationAttachments(messageId: String): List<Attachment> {
         val result = ArrayList<Attachment>()
         database.writable().rawQuery(
@@ -295,20 +308,51 @@ class ConversationRepository(private val database: CystemDatabase) {
         return result
     }
 
-    fun attachToMessage(messageId: String, attachmentId: String) {
+    fun insertSource(source: Source) {
         database.writable().insertOrThrow(
-            "message_attachments",
+            "sources",
             null,
             ContentValues().apply {
-                put("message_id", messageId)
-                put("attachment_id", attachmentId)
+                put("id", source.id)
+                put("message_id", source.messageId)
+                put("title", source.title)
+                put("url", source.url)
+                put("date", source.date)
+                put("snippet", source.snippet)
             },
         )
     }
+
+    fun listSources(messageId: String): List<Source> {
+        val result = ArrayList<Source>()
+        database.writable().query(
+            "sources",
+            arrayOf("id","message_id","title","url","date","snippet"),
+            "message_id = ?",
+            arrayOf(messageId),
+            null, null,
+            "rowid ASC",
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result += Source(
+                    id = cursor.getString(0),
+                    messageId = cursor.getString(1),
+                    title = cursor.getString(2),
+                    url = cursor.getString(3),
+                    date = cursor.getString(4),
+                    snippet = cursor.getString(5),
+                )
+            }
+        }
+        return result
+    }
 }
 
-private fun Cursor.getLongOrNull(index: Int): Long? = if (isNull(index)) null else getLong(index)
-private fun Cursor.getIntOrNull(index: Int): Int? = if (isNull(index)) null else getInt(index)
+private fun Cursor.getLongOrNull(index: Int): Long? =
+    if (isNull(index)) null else getLong(index)
+
+private fun Cursor.getIntOrNull(index: Int): Int? =
+    if (isNull(index)) null else getInt(index)
 
 object ConversationTitles {
     fun fromFirstMessage(text: String): String {

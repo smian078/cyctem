@@ -1,11 +1,13 @@
 package com.cystem.ui
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.cystem.core.coordinator.PipelineEvent
 import com.cystem.core.coordinator.ToolConfirmation
 import com.cystem.core.coordinator.UserRequest
 import com.cystem.core.di.AppContainer
+import com.cystem.core.model.Attachment
 import com.cystem.core.model.Conversation
 import com.cystem.core.model.GenerationSettings
 import com.cystem.core.model.Message
@@ -37,6 +39,7 @@ data class CystemUiState(
     val darkMode: Boolean = true,
     val bootVisible: Boolean = true,
     val generation: GenerationSettings = GenerationSettings(),
+    val pendingAttachments: List<Attachment> = emptyList(),
 )
 
 class CystemViewModel(
@@ -156,14 +159,47 @@ class CystemViewModel(
 
     fun importSharedText(text: String) {
         if (text.isBlank()) return
-        ensureConversationThen { id -> sendToCoordinator(id, text) }
+        ensureConversationThen { id -> sendToCoordinator(id, text, emptyList()) }
+    }
+
+    fun importSharedUris(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val imported = uris.take(8).mapNotNull { uri ->
+                runCatching {
+                    container.attachmentStore.importUri(
+                        uri = uri,
+                        displayName = uri.lastPathSegment,
+                    )
+                }.getOrNull()
+            }
+            if (imported.isEmpty()) {
+                mutable.value = mutable.value.copy(
+                    error = "The shared attachment could not be imported.",
+                    stage = null,
+                )
+                return@launch
+            }
+
+            val existing = mutable.value.pendingAttachments
+            mutable.value = mutable.value.copy(
+                pendingAttachments = (existing + imported).distinctBy { it.id }.take(8),
+                draft = mutable.value.draft.ifBlank { "Analyze the attached files." },
+                stage = imported.size.toString() + " attachment(s) ready",
+            )
+        }
     }
 
     fun sendDraft() {
-        val text = mutable.value.draft.trim()
-        if (text.isBlank() || mutable.value.processing) return
-        mutable.value = mutable.value.copy(draft = "")
-        ensureConversationThen { id -> sendToCoordinator(id, text) }
+        val state = mutable.value
+        val text = state.draft.trim()
+        if (text.isBlank() || state.processing) return
+        val attachments = state.pendingAttachments
+        mutable.value = state.copy(
+            draft = "",
+            pendingAttachments = emptyList(),
+        )
+        ensureConversationThen { id -> sendToCoordinator(id, text, attachments) }
     }
 
     fun stopGeneration() {
@@ -241,7 +277,11 @@ class CystemViewModel(
         }
     }
 
-    private fun sendToCoordinator(conversationId: String, text: String) {
+    private fun sendToCoordinator(
+        conversationId: String,
+        text: String,
+        attachments: List<Attachment>,
+    ) {
         val state = mutable.value
         if (state.processing) return
 
@@ -259,6 +299,7 @@ class CystemViewModel(
             val request = UserRequest(
                 conversationId = conversationId,
                 text = text,
+                attachments = attachments,
                 settings = state.generation,
                 customInstructions = state.customInstructions,
             )
@@ -307,6 +348,13 @@ class CystemViewModel(
                     sources = (mutable.value.sources + event.source)
                         .distinctBy { it.url }
                         .take(12),
+                )
+
+            is PipelineEvent.AttachmentFound ->
+                mutable.value = mutable.value.copy(
+                    pendingAttachments = (mutable.value.pendingAttachments + event.attachment)
+                        .distinctBy { it.id }
+                        .take(8),
                 )
 
             is PipelineEvent.ToolCallStarted ->

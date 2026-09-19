@@ -16,10 +16,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 data class CystemUiState(
@@ -174,12 +172,11 @@ class CystemViewModel(
         viewModelScope.launch {
             job.cancelAndJoin()
             val active = mutable.value.activeConversationId
-            val pair = active?.let { readMessages(it) }
+            val latest = active?.let { readMessages(it) }.orEmpty()
             mutable.value = mutable.value.copy(
                 processing = false,
                 stage = "Cancelled",
-                messages = pair?.first.orEmpty(),
-                messageAttachments = pair?.second.orEmpty(),
+                messages = latest,
             )
         }
     }
@@ -248,7 +245,7 @@ class CystemViewModel(
         val state = mutable.value
         if (state.processing) return
 
-        viewModelScope.launch {
+        activeGenerationJob = viewModelScope.launch {
             mutable.value = mutable.value.copy(
                 processing = true,
                 stage = "Preparing request",
@@ -269,11 +266,17 @@ class CystemViewModel(
             try {
                 container.coordinator.run(request).collectLatest(::handlePipelineEvent)
             } catch (error: Exception) {
-                mutable.value = mutable.value.copy(
-                    processing = false,
-                    stage = null,
-                    error = error.message ?: "Request failed",
-                )
+                if (error !is kotlinx.coroutines.CancellationException) {
+                    mutable.value = mutable.value.copy(
+                        processing = false,
+                        stage = null,
+                        error = error.message ?: "Request failed",
+                    )
+                }
+            } finally {
+                if (activeGenerationJob === kotlinx.coroutines.currentCoroutineContext()[Job]) {
+                    activeGenerationJob = null
+                }
             }
         }
     }

@@ -2,6 +2,7 @@ package com.cystem.core.storage
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteDatabaseCorruptException
 import android.database.sqlite.SQLiteOpenHelper
@@ -18,71 +19,12 @@ internal class CystemDbHelper(
     }
 
     override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL(
-            "CREATE TABLE conversations(" +
-                "id TEXT PRIMARY KEY NOT NULL," +
-                "title TEXT NOT NULL," +
-                "created_at INTEGER NOT NULL," +
-                "updated_at INTEGER NOT NULL," +
-                "pinned INTEGER NOT NULL DEFAULT 0)",
-        )
-        db.execSQL(
-            "CREATE TABLE messages(" +
-                "id TEXT PRIMARY KEY NOT NULL," +
-                "conversation_id TEXT NOT NULL," +
-                "role TEXT NOT NULL," +
-                "content TEXT NOT NULL," +
-                "created_at INTEGER NOT NULL," +
-                "reasoning TEXT," +
-                "status TEXT NOT NULL," +
-                "model TEXT," +
-                "response_id TEXT," +
-                "input_tokens INTEGER," +
-                "output_tokens INTEGER," +
-                "latency_ms INTEGER," +
-                "FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE)",
-        )
-        db.execSQL(
-            "CREATE TABLE attachments(" +
-                "id TEXT PRIMARY KEY NOT NULL," +
-                "local_path TEXT NOT NULL," +
-                "mime_type TEXT NOT NULL," +
-                "size_bytes INTEGER NOT NULL," +
-                "width INTEGER," +
-                "height INTEGER," +
-                "source_url TEXT," +
-                "source_title TEXT)",
-        )
-        db.execSQL(
-            "CREATE TABLE message_attachments(" +
-                "message_id TEXT NOT NULL," +
-                "attachment_id TEXT NOT NULL," +
-                "PRIMARY KEY(message_id, attachment_id)," +
-                "FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE," +
-                "FOREIGN KEY(attachment_id) REFERENCES attachments(id) ON DELETE CASCADE)",
-        )
-        db.execSQL(
-            "CREATE TABLE sources(" +
-                "id TEXT PRIMARY KEY NOT NULL," +
-                "message_id TEXT NOT NULL," +
-                "title TEXT NOT NULL," +
-                "url TEXT NOT NULL," +
-                "date TEXT," +
-                "snippet TEXT," +
-                "FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE)",
-        )
-        db.execSQL(
-            "CREATE TABLE tool_calls(" +
-                "id TEXT PRIMARY KEY NOT NULL," +
-                "message_id TEXT NOT NULL," +
-                "name TEXT NOT NULL," +
-                "arguments_json TEXT NOT NULL," +
-                "result TEXT," +
-                "status TEXT NOT NULL," +
-                "created_at INTEGER NOT NULL," +
-                "finished_at INTEGER," +
-                "FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE)",
-        )
+        db.execSQL("CREATE TABLE conversations(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,pinned INTEGER NOT NULL DEFAULT 0)")
+        db.execSQL("CREATE TABLE messages(id TEXT PRIMARY KEY NOT NULL,conversation_id TEXT NOT NULL,role TEXT NOT NULL,content TEXT NOT NULL,created_at INTEGER NOT NULL,reasoning TEXT,status TEXT NOT NULL,model TEXT,response_id TEXT,input_tokens INTEGER,output_tokens INTEGER,latency_ms INTEGER,FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE)")
+        db.execSQL("CREATE TABLE attachments(id TEXT PRIMARY KEY NOT NULL,local_path TEXT NOT NULL,mime_type TEXT NOT NULL,size_bytes INTEGER NOT NULL,width INTEGER,height INTEGER,source_url TEXT,source_title TEXT)")
+        db.execSQL("CREATE TABLE message_attachments(message_id TEXT NOT NULL,attachment_id TEXT NOT NULL,PRIMARY KEY(message_id,attachment_id),FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,FOREIGN KEY(attachment_id) REFERENCES attachments(id) ON DELETE CASCADE)")
+        db.execSQL("CREATE TABLE sources(id TEXT PRIMARY KEY NOT NULL,message_id TEXT NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL,date TEXT,snippet TEXT,FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE)")
+        db.execSQL("CREATE TABLE tool_calls(id TEXT PRIMARY KEY NOT NULL,message_id TEXT NOT NULL,name TEXT NOT NULL,arguments_json TEXT NOT NULL,result TEXT,status TEXT NOT NULL,created_at INTEGER NOT NULL,finished_at INTEGER,FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE)")
         db.execSQL("CREATE INDEX idx_messages_conversation_created ON messages(conversation_id, created_at)")
         db.execSQL("CREATE INDEX idx_sources_message ON sources(message_id)")
         db.execSQL("CREATE INDEX idx_tools_message ON tool_calls(message_id)")
@@ -92,10 +34,13 @@ internal class CystemDbHelper(
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         }
+        if (oldVersion < 3) {
+            db.execSQL("CREATE TABLE attachment_analysis(attachment_id TEXT PRIMARY KEY NOT NULL,analysis TEXT NOT NULL,created_at INTEGER NOT NULL,FOREIGN KEY(attachment_id) REFERENCES attachments(id) ON DELETE CASCADE)")
+        }
     }
 
     companion object {
-        const val DATABASE_VERSION = 2
+        const val DATABASE_VERSION = 3
     }
 }
 
@@ -104,11 +49,24 @@ class CystemDatabase(context: Context) {
     private var helper = CystemDbHelper(appContext)
 
     fun <T> transaction(block: (SQLiteDatabase) -> T): T {
-        return try {
-            helper.writableDatabase.runInTransaction { block(helper.writableDatabase) }
+        try {
+            val db = helper.writableDatabase
+            db.beginTransaction()
+            val result = try {
+                block(db).also { db.setTransactionSuccessful() }
+            } finally {
+                db.endTransaction()
+            }
+            return result
         } catch (_: SQLiteDatabaseCorruptException) {
             recoverFromCorruption()
-            helper.writableDatabase.runInTransaction { block(helper.writableDatabase) }
+            val db = helper.writableDatabase
+            db.beginTransaction()
+            return try {
+                block(db).also { db.setTransactionSuccessful() }
+            } finally {
+                db.endTransaction()
+            }
         }
     }
 
@@ -158,10 +116,7 @@ class ConversationRepository(private val database: CystemDatabase) {
         database.writable().query(
             "conversations",
             arrayOf("id", "title", "created_at", "updated_at", "pinned"),
-            null,
-            null,
-            null,
-            null,
+            null, null, null, null,
             "pinned DESC, updated_at DESC",
         ).use { cursor ->
             while (cursor.moveToNext()) {
@@ -202,9 +157,7 @@ class ConversationRepository(private val database: CystemDatabase) {
     }
 
     fun deleteConversation(id: String) {
-        database.transaction { db ->
-            db.delete("conversations", "id = ?", arrayOf(id))
-        }
+        database.transaction { db -> db.delete("conversations", "id = ?", arrayOf(id)) }
     }
 
     fun insertMessage(message: Message) {
@@ -228,19 +181,32 @@ class ConversationRepository(private val database: CystemDatabase) {
         )
     }
 
+    fun updateMessage(message: Message) {
+        database.writable().update(
+            "messages",
+            ContentValues().apply {
+                put("content", message.content)
+                put("reasoning", message.reasoning)
+                put("status", message.status.name)
+                put("model", message.model)
+                put("response_id", message.responseId)
+                message.inputTokens?.let { put("input_tokens", it) }
+                message.outputTokens?.let { put("output_tokens", it) }
+                message.latencyMs?.let { put("latency_ms", it) }
+            },
+            "id = ?",
+            arrayOf(message.id),
+        )
+    }
+
     fun listMessages(conversationId: String): List<Message> {
         val result = ArrayList<Message>()
         database.writable().query(
             "messages",
-            arrayOf(
-                "id", "conversation_id", "role", "content", "created_at",
-                "reasoning", "status", "model", "response_id",
-                "input_tokens", "output_tokens", "latency_ms",
-            ),
+            arrayOf("id","conversation_id","role","content","created_at","reasoning","status","model","response_id","input_tokens","output_tokens","latency_ms"),
             "conversation_id = ?",
             arrayOf(conversationId),
-            null,
-            null,
+            null, null,
             "created_at ASC",
         ).use { cursor ->
             while (cursor.moveToNext()) {
@@ -262,10 +228,87 @@ class ConversationRepository(private val database: CystemDatabase) {
         }
         return result
     }
+
+    fun saveAttachmentAnalysis(attachmentId: String, analysis: String, now: Long) {
+        database.writable().insertWithOnConflict(
+            "attachment_analysis",
+            null,
+            ContentValues().apply {
+                put("attachment_id", attachmentId)
+                put("analysis", analysis)
+                put("created_at", now)
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    fun findAttachmentAnalysis(attachmentId: String): String? {
+        database.writable().query(
+            "attachment_analysis",
+            arrayOf("analysis"),
+            "attachment_id = ?",
+            arrayOf(attachmentId),
+            null, null, null,
+            "1",
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }
+
+    fun insertAttachment(attachment: Attachment) {
+        database.writable().insertOrThrow(
+            "attachments",
+            null,
+            ContentValues().apply {
+                put("id", attachment.id)
+                put("local_path", attachment.localPath)
+                put("mime_type", attachment.mimeType)
+                put("size_bytes", attachment.sizeBytes)
+                attachment.width?.let { put("width", it) }
+                attachment.height?.let { put("height", it) }
+                attachment.sourceUrl?.let { put("source_url", it) }
+                attachment.sourceTitle?.let { put("source_title", it) }
+            },
+        )
+    }
+
+    fun listConversationAttachments(messageId: String): List<Attachment> {
+        val result = ArrayList<Attachment>()
+        database.writable().rawQuery(
+            "SELECT a.id,a.local_path,a.mime_type,a.size_bytes,a.width,a.height,a.source_url,a.source_title " +
+                "FROM attachments a INNER JOIN message_attachments ma ON a.id=ma.attachment_id WHERE ma.message_id=?",
+            arrayOf(messageId),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result += Attachment(
+                    id = cursor.getString(0),
+                    localPath = cursor.getString(1),
+                    mimeType = cursor.getString(2),
+                    sizeBytes = cursor.getLong(3),
+                    width = cursor.getIntOrNull(4),
+                    height = cursor.getIntOrNull(5),
+                    sourceUrl = cursor.getString(6),
+                    sourceTitle = cursor.getString(7),
+                )
+            }
+        }
+        return result
+    }
+
+    fun attachToMessage(messageId: String, attachmentId: String) {
+        database.writable().insertOrThrow(
+            "message_attachments",
+            null,
+            ContentValues().apply {
+                put("message_id", messageId)
+                put("attachment_id", attachmentId)
+            },
+        )
+    }
 }
 
-private fun android.database.Cursor.getLongOrNull(index: Int): Long? =
-    if (isNull(index)) null else getLong(index)
+private fun Cursor.getLongOrNull(index: Int): Long? = if (isNull(index)) null else getLong(index)
+private fun Cursor.getIntOrNull(index: Int): Int? = if (isNull(index)) null else getInt(index)
 
 object ConversationTitles {
     fun fromFirstMessage(text: String): String {

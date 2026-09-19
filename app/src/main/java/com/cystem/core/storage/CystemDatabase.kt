@@ -396,9 +396,9 @@ class ConversationRepository(private val database: CystemDatabase) {
                             .put("status", cursor.getString(cursor.getColumnIndexOrThrow("status")))
                             .put("model", cursor.getStringOrNull("model"))
                             .put("response_id", cursor.getStringOrNull("response_id"))
-                            .put("input_tokens", cursor.getLongOrNull("input_tokens"))
-                            .put("output_tokens", cursor.getLongOrNull("output_tokens"))
-                            .put("latency_ms", cursor.getLongOrNull("latency_ms")),
+                            .put("input_tokens", cursor.getLongOrNull(cursor.getColumnIndexOrThrow("input_tokens")))
+                            .put("output_tokens", cursor.getLongOrNull(cursor.getColumnIndexOrThrow("output_tokens")))
+                            .put("latency_ms", cursor.getLongOrNull(cursor.getColumnIndexOrThrow("latency_ms"))),
                     )
                 }
             }
@@ -458,7 +458,7 @@ class ConversationRepository(private val database: CystemDatabase) {
                             .put("result", cursor.getStringOrNull("result"))
                             .put("status", cursor.getString(cursor.getColumnIndexOrThrow("status")))
                             .put("created_at", cursor.getLong(cursor.getColumnIndexOrThrow("created_at")))
-                            .put("finished_at", cursor.getLongOrNull("finished_at")),
+                            .put("finished_at", cursor.getLongOrNull(cursor.getColumnIndexOrThrow("finished_at"))),
                     )
                 }
             }

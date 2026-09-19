@@ -82,7 +82,7 @@ class NvidiaClient(
         if (tools.isNotEmpty()) {
             payload.put(
                 "tools",
-                JSONArray().apply { tools.forEach(::put) },
+                JSONArray().apply { tools.forEach { put(it) } },
             )
         }
 

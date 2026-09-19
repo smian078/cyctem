@@ -7,67 +7,53 @@ import com.cystem.core.model.Message
 import com.cystem.core.model.MessageRole
 import com.cystem.core.model.MessageStatus
 import com.cystem.core.model.Source
+import com.cystem.core.model.ToolCallRecord
 import com.cystem.core.network.ChatTurn
+import com.cystem.core.network.CompletedToolCall
 import com.cystem.core.network.GeminiClient
 import com.cystem.core.network.NimStreamEvent
 import com.cystem.core.network.NvidiaClient
 import com.cystem.core.network.ProviderException
 import com.cystem.core.network.WebSource
+import com.cystem.core.tools.ToolResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.util.UUID
-
-data class UserRequest(
-    val conversationId: String,
-    val text: String,
-    val attachments: List<Attachment> = emptyList(),
-    val forceSearch: Boolean = false,
-    val forceImageSearch: Boolean = false,
-    val settings: com.cystem.core.model.GenerationSettings,
-    val customInstructions: String = "",
-)
-
-sealed interface PipelineEvent {
-    data class Stage(val name: String) : PipelineEvent
-    data object ResetStreaming : PipelineEvent
-    data class TextDelta(val delta: String) : PipelineEvent
-    data class ReasoningDelta(val delta: String) : PipelineEvent
-    data class SourceFound(val source: WebSource) : PipelineEvent
-    data class ToolCallStarted(
-        val id: String,
-        val name: String,
-        val argumentsJson: String,
-    ) : PipelineEvent
-    data class ToolCallFinished(
-        val id: String,
-        val name: String,
-        val result: String,
-        val success: Boolean,
-    ) : PipelineEvent
-    data class Completed(
-        val model: String,
-        val responseId: String?,
-        val inputTokens: Long?,
-        val outputTokens: Long?,
-        val latencyMs: Long,
-    ) : PipelineEvent
-    data class Failed(val message: String, val recoverable: Boolean) : PipelineEvent
-}
+import java.util.concurrent.ConcurrentHashMap
 
 class RequestCoordinator(
     private val container: AppContainer,
     private val nvidia: NvidiaClient = NvidiaClient(),
     private val gemini: GeminiClient = GeminiClient(),
 ) {
-    fun run(request: UserRequest): Flow<PipelineEvent> = flow {
-        val startedAt = System.currentTimeMillis()
-        emit(PipelineEvent.Stage("Preparing request"))
+    private data class PendingTool(
+        val confirmation: ToolConfirmation,
+        val request: UserRequest,
+        val nvidiaKey: String,
+        val turns: MutableList<ChatTurn>,
+        val assistantMessageId: String,
+        val toolCall: CompletedToolCall,
+        val toolRecordId: String,
+        val loop: Int,
+        val startedAt: Long,
+        val text: String,
+        val reasoning: String,
+        val responseId: String?,
+        val inputTokens: Long?,
+        val outputTokens: Long?,
+    )
 
+    private val pendingTools = ConcurrentHashMap<String, PendingTool>()
+
+    fun run(request: UserRequest): Flow<PipelineEvent> = flow {
         val nvidiaKey = container.settingsStore.readNvidiaApiKey()
         if (nvidiaKey.isNullOrBlank()) {
             emit(
@@ -79,142 +65,156 @@ class RequestCoordinator(
             return@flow
         }
 
-        val attachmentContext = analyzeAttachments(
-            attachments = request.attachments,
-            key = nvidiaKey,
-            emit = { emit(it) },
-        )
+        val startedAt = System.currentTimeMillis()
+        emit(PipelineEvent.Stage("Preparing request"))
 
-        val intent = SearchIntentDetector.detect(
-            text = request.text,
-            forceWeb = request.forceSearch,
-            forceImages = request.forceImageSearch,
-        )
+        try {
+            val attachmentContext = analyzeAttachments(
+                attachments = request.attachments,
+                key = nvidiaKey,
+                emit = { emit(it) },
+            )
 
-        val search = collectSearchContext(
-            request = request,
-            intent = intent,
-            emit = { emit(it) },
-        )
+            val intent = SearchIntentDetector.detect(
+                request.text,
+                request.forceSearch,
+                request.forceImageSearch,
+            )
 
-        val userMessage = Message(
-            id = UUID.randomUUID().toString(),
-            conversationId = request.conversationId,
-            role = MessageRole.USER,
-            content = request.text,
-            createdAt = System.currentTimeMillis(),
-        )
-        container.conversations.insertMessage(userMessage)
+            val search = collectSearchContext(
+                request = request,
+                intent = intent,
+                emit = { emit(it) },
+            )
 
-        val history = container.conversations.listMessages(request.conversationId)
-            .dropLast(1)
-            .takeLast(24)
+            val userMessage = Message(
+                id = UUID.randomUUID().toString(),
+                conversationId = request.conversationId,
+                role = MessageRole.USER,
+                content = request.text,
+                createdAt = System.currentTimeMillis(),
+            )
+            container.conversations.insertMessage(userMessage)
 
-        val turns = ArrayList<ChatTurn>()
-        turns += ChatTurn(
-            role = "system",
-            content = buildSystemPrompt(
-                customInstructions = request.customInstructions,
+            val assistantMessageId = UUID.randomUUID().toString()
+            container.conversations.insertMessage(
+                Message(
+                    id = assistantMessageId,
+                    conversationId = request.conversationId,
+                    role = MessageRole.ASSISTANT,
+                    content = "",
+                    createdAt = System.currentTimeMillis(),
+                    status = MessageStatus.STREAMING,
+                    model = request.settings.model,
+                ),
+            )
+
+            val turns = buildTurns(
+                request = request,
                 attachmentContext = attachmentContext,
                 searchContext = search.context,
+            )
+
+            executeGeneration(
+                request = request,
+                nvidiaKey = nvidiaKey,
+                turns = turns,
+                assistantMessageId = assistantMessageId,
+                searchSources = search.sources,
+                loop = 0,
+                startedAt = startedAt,
+                initialText = "",
+                initialReasoning = "",
+                initialResponseId = null,
+                initialInputTokens = null,
+                initialOutputTokens = null,
+                emit = emit,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: ProviderException) {
+            emit(PipelineEvent.Failed(error.messageForUser, error.retryable))
+        } catch (error: Exception) {
+            emit(PipelineEvent.Failed(error.message ?: "The request failed.", false))
+        }
+    }.flowOn(Dispatchers.IO)
+
+    fun resumeToolConfirmation(
+        confirmationId: String,
+        approved: Boolean,
+    ): Flow<PipelineEvent> = flow {
+        val pending = pendingTools.remove(confirmationId)
+        if (pending == null) {
+            emit(PipelineEvent.Failed("That confirmation is no longer active.", false))
+            return@flow
+        }
+
+        val args = runCatching { JSONObject(pending.toolCall.argumentsJson.ifBlank { "{}" }) }
+            .getOrElse {
+                emit(PipelineEvent.Failed("The tool arguments are no longer valid.", false))
+                return@flow
+            }
+
+        val result = if (!approved) {
+            ToolResult.Failure("The user declined the requested action.")
+        } else {
+            container.phoneTools.executeConfirmed(
+                name = pending.toolCall.name,
+                arguments = args,
+            )
+        }
+
+        val success = result is ToolResult.Success
+        val output = when (result) {
+            is ToolResult.Success -> result.output
+            is ToolResult.Failure -> result.message
+            is ToolResult.ConfirmationRequired -> "Confirmation was requested again."
+        }
+
+        container.conversations.updateToolCall(
+            ToolCallRecord(
+                id = pending.toolRecordId,
+                messageId = pending.assistantMessageId,
+                name = pending.toolCall.name,
+                argumentsJson = pending.toolCall.argumentsJson,
+                result = output,
+                status = if (success) "SUCCESS" else "FAILED",
+                createdAt = pending.startedAt,
+                finishedAt = System.currentTimeMillis(),
             ),
         )
 
-        history.forEach { message ->
-            turns += ChatTurn(
-                role = when (message.role) {
-                    MessageRole.USER -> "user"
-                    MessageRole.ASSISTANT -> "assistant"
-                    MessageRole.SYSTEM -> "system"
-                    MessageRole.TOOL -> "tool"
-                },
-                content = message.content,
-            )
-        }
-        turns += ChatTurn(role = "user", content = request.text)
+        emit(
+            PipelineEvent.ToolCallFinished(
+                id = pending.toolCall.id,
+                name = pending.toolCall.name,
+                result = output,
+                success = success,
+            ),
+        )
 
-        emit(PipelineEvent.Stage("Generating"))
-
-        var text = ""
-        var reasoning = ""
-        var responseId: String? = null
-        var usageIn: Long? = null
-        var usageOut: Long? = null
+        pending.turns += ChatTurn(
+            role = "tool",
+            content = output,
+            toolCallId = pending.toolCall.id,
+            name = pending.toolCall.name,
+        )
 
         try {
-            nvidia.streamChat(
-                apiKey = nvidiaKey,
-                settings = request.settings,
-                messages = turns,
-                tools = emptyList(),
-            ).retryWhen { cause, attempt ->
-                val retryable = cause is ProviderException && cause.retryable && attempt < 2
-                if (retryable) {
-                    text = ""
-                    reasoning = ""
-                    responseId = null
-                    usageIn = null
-                    usageOut = null
-                    emit(PipelineEvent.ResetStreaming)
-                    emit(PipelineEvent.Stage("Retrying connection"))
-                }
-                retryable
-            }.collect { event ->
-                when (event) {
-                    is NimStreamEvent -> {
-                        event.text?.let {
-                            text += it
-                            emit(PipelineEvent.TextDelta(it))
-                        }
-                        event.reasoning?.let {
-                            reasoning += it
-                            emit(PipelineEvent.ReasoningDelta(it))
-                        }
-                        responseId = event.responseId ?: responseId
-                        usageIn = event.usage?.inputTokens ?: usageIn
-                        usageOut = event.usage?.outputTokens ?: usageOut
-                    }
-                }
-            }
-
-            val assistantId = UUID.randomUUID().toString()
-            val assistant = Message(
-                id = assistantId,
-                conversationId = request.conversationId,
-                role = MessageRole.ASSISTANT,
-                content = text,
-                createdAt = System.currentTimeMillis(),
-                reasoning = reasoning.ifBlank { null },
-                status = MessageStatus.COMPLETE,
-                model = request.settings.model,
-                responseId = responseId,
-                inputTokens = usageIn,
-                outputTokens = usageOut,
-                latencyMs = System.currentTimeMillis() - startedAt,
-            )
-            container.conversations.insertMessage(assistant)
-
-            search.sources.forEach { source ->
-                container.conversations.insertSource(
-                    Source(
-                        id = UUID.randomUUID().toString(),
-                        messageId = assistantId,
-                        title = source.title,
-                        url = source.url,
-                        date = source.date,
-                        snippet = source.snippet,
-                    ),
-                )
-            }
-
-            emit(
-                PipelineEvent.Completed(
-                    model = request.settings.model,
-                    responseId = responseId,
-                    inputTokens = usageIn,
-                    outputTokens = usageOut,
-                    latencyMs = System.currentTimeMillis() - startedAt,
-                ),
+            executeGeneration(
+                request = pending.request,
+                nvidiaKey = pending.nvidiaKey,
+                turns = pending.turns,
+                assistantMessageId = pending.assistantMessageId,
+                searchSources = emptyList(),
+                loop = pending.loop + 1,
+                startedAt = pending.startedAt,
+                initialText = pending.text,
+                initialReasoning = pending.reasoning,
+                initialResponseId = pending.responseId,
+                initialInputTokens = pending.inputTokens,
+                initialOutputTokens = pending.outputTokens,
+                emit = emit,
             )
         } catch (error: ProviderException) {
             emit(PipelineEvent.Failed(error.messageForUser, error.retryable))
@@ -223,10 +223,324 @@ class RequestCoordinator(
         }
     }.flowOn(Dispatchers.IO)
 
-    private data class SearchContext(
-        val context: String,
-        val sources: List<WebSource>,
-    )
+    private suspend fun executeGeneration(
+        request: UserRequest,
+        nvidiaKey: String,
+        turns: MutableList<ChatTurn>,
+        assistantMessageId: String,
+        searchSources: List<WebSource>,
+        loop: Int,
+        startedAt: Long,
+        initialText: String,
+        initialReasoning: String,
+        initialResponseId: String?,
+        initialInputTokens: Long?,
+        initialOutputTokens: Long?,
+        emit: suspend (PipelineEvent) -> Unit,
+    ) {
+        if (loop >= MAX_TOOL_LOOPS) {
+            persistAssistant(
+                id = assistantMessageId,
+                request = request,
+                text = initialText,
+                reasoning = initialReasoning,
+                status = MessageStatus.FAILED,
+                responseId = initialResponseId,
+                inputTokens = initialInputTokens,
+                outputTokens = initialOutputTokens,
+                latencyMs = System.currentTimeMillis() - startedAt,
+            )
+            emit(PipelineEvent.Failed("Tool-call loop limit reached.", false))
+            return
+        }
+
+        emit(PipelineEvent.Stage(if (loop == 0) "Generating" else "Continuing with tool results"))
+
+        var text = initialText
+        var reasoning = initialReasoning
+        var responseId = initialResponseId
+        var inputTokens = initialInputTokens
+        var outputTokens = initialOutputTokens
+
+        val callBuilders = linkedMapOf<Int, MutableToolCall>()
+        val stream = nvidia.streamChat(
+            apiKey = nvidiaKey,
+            settings = request.settings,
+            messages = turns,
+            tools = container.phoneTools.registry.definitions(
+                container.settingsStore.readEnabledPhoneTools(),
+            ),
+        )
+
+        try {
+            stream.retryWhen { cause, attempt ->
+                val retryable = cause is ProviderException && cause.retryable && attempt < 2
+                if (retryable) {
+                    text = initialText
+                    reasoning = initialReasoning
+                    responseId = initialResponseId
+                    inputTokens = initialInputTokens
+                    outputTokens = initialOutputTokens
+                    callBuilders.clear()
+                    emit(PipelineEvent.ResetStreaming)
+                    emit(PipelineEvent.Stage("Retrying connection"))
+                }
+                retryable
+            }.collect { event ->
+                event.text?.let {
+                    text += it
+                    emit(PipelineEvent.TextDelta(it))
+                }
+                event.reasoning?.let {
+                    reasoning += it
+                    emit(PipelineEvent.ReasoningDelta(it))
+                }
+                responseId = event.responseId ?: responseId
+                inputTokens = event.usage?.inputTokens ?: inputTokens
+                outputTokens = event.usage?.outputTokens ?: outputTokens
+
+                event.toolCalls.forEach { delta ->
+                    val builder = callBuilders.getOrPut(delta.index) {
+                        MutableToolCall(index = delta.index)
+                    }
+                    delta.id?.let { builder.id = it }
+                    delta.name?.let { builder.name = it }
+                    delta.arguments?.let { builder.arguments.append(it) }
+                }
+            }
+
+            if (callBuilders.isEmpty()) {
+                persistAssistant(
+                    id = assistantMessageId,
+                    request = request,
+                    text = text,
+                    reasoning = reasoning,
+                    status = MessageStatus.COMPLETE,
+                    responseId = responseId,
+                    inputTokens = inputTokens,
+                    outputTokens = outputTokens,
+                    latencyMs = System.currentTimeMillis() - startedAt,
+                )
+
+                searchSources.forEach { source ->
+                    container.conversations.insertSource(
+                        Source(
+                            id = UUID.randomUUID().toString(),
+                            messageId = assistantMessageId,
+                            title = source.title,
+                            url = source.url,
+                            date = source.date,
+                            snippet = source.snippet,
+                        ),
+                    )
+                }
+
+                emit(
+                    PipelineEvent.Completed(
+                        model = request.settings.model,
+                        responseId = responseId,
+                        inputTokens = inputTokens,
+                        outputTokens = outputTokens,
+                        latencyMs = System.currentTimeMillis() - startedAt,
+                    ),
+                )
+                return
+            }
+
+            val completedCalls = callBuilders.values.mapNotNull { it.toCompletedCall() }
+            turns += ChatTurn(
+                role = "assistant",
+                content = text.ifBlank { null },
+                toolCalls = completedCalls,
+            )
+
+            for (call in completedCalls) {
+                emit(
+                    PipelineEvent.ToolCallStarted(
+                        id = call.id,
+                        name = call.name,
+                        argumentsJson = call.argumentsJson,
+                    ),
+                )
+
+                val recordId = UUID.randomUUID().toString()
+                val now = System.currentTimeMillis()
+                container.conversations.insertToolCall(
+                    ToolCallRecord(
+                        id = recordId,
+                        messageId = assistantMessageId,
+                        name = call.name,
+                        argumentsJson = call.argumentsJson,
+                        result = null,
+                        status = "RUNNING",
+                        createdAt = now,
+                    ),
+                )
+
+                val toolResult = container.toolExecutor.execute(
+                    name = call.name,
+                    argumentsJson = call.argumentsJson,
+                )
+
+                when (toolResult) {
+                    is ToolResult.ConfirmationRequired -> {
+                        container.conversations.updateToolCall(
+                            ToolCallRecord(
+                                id = recordId,
+                                messageId = assistantMessageId,
+                                name = call.name,
+                                argumentsJson = call.argumentsJson,
+                                result = toolResult.prompt,
+                                status = "AWAITING_CONFIRMATION",
+                                createdAt = now,
+                            ),
+                        )
+
+                        val confirmation = ToolConfirmation(
+                            confirmationId = toolResult.confirmationId,
+                            toolCallId = call.id,
+                            toolName = call.name,
+                            prompt = toolResult.prompt,
+                        )
+                        pendingTools[confirmation.confirmationId] = PendingTool(
+                            confirmation = confirmation,
+                            request = request,
+                            nvidiaKey = nvidiaKey,
+                            turns = turns,
+                            assistantMessageId = assistantMessageId,
+                            toolCall = call,
+                            toolRecordId = recordId,
+                            loop = loop,
+                            startedAt = startedAt,
+                            text = text,
+                            reasoning = reasoning,
+                            responseId = responseId,
+                            inputTokens = inputTokens,
+                            outputTokens = outputTokens,
+                        )
+
+                        emit(
+                            PipelineEvent.ToolConfirmationRequired(
+                                confirmation = confirmation,
+                            ),
+                        )
+                        return
+                    }
+
+                    is ToolResult.Success,
+                    is ToolResult.Failure -> {
+                        val success = toolResult is ToolResult.Success
+                        val output = when (toolResult) {
+                            is ToolResult.Success -> toolResult.output
+                            is ToolResult.Failure -> toolResult.message
+                            else -> error("unreachable")
+                        }
+
+                        container.conversations.updateToolCall(
+                            ToolCallRecord(
+                                id = recordId,
+                                messageId = assistantMessageId,
+                                name = call.name,
+                                argumentsJson = call.argumentsJson,
+                                result = output,
+                                status = if (success) "SUCCESS" else "FAILED",
+                                createdAt = now,
+                                finishedAt = System.currentTimeMillis(),
+                            ),
+                        )
+
+                        emit(
+                            PipelineEvent.ToolCallFinished(
+                                id = call.id,
+                                name = call.name,
+                                result = output,
+                                success = success,
+                            ),
+                        )
+
+                        turns += ChatTurn(
+                            role = "tool",
+                            content = output,
+                            toolCallId = call.id,
+                            name = call.name,
+                        )
+                    }
+                }
+            }
+
+            executeGeneration(
+                request = request,
+                nvidiaKey = nvidiaKey,
+                turns = turns,
+                assistantMessageId = assistantMessageId,
+                searchSources = searchSources,
+                loop = loop + 1,
+                startedAt = startedAt,
+                initialText = text,
+                initialReasoning = reasoning,
+                initialResponseId = responseId,
+                initialInputTokens = inputTokens,
+                initialOutputTokens = outputTokens,
+                emit = emit,
+            )
+        } catch (cancelled: CancellationException) {
+            persistAssistant(
+                id = assistantMessageId,
+                request = request,
+                text = text,
+                reasoning = reasoning,
+                status = MessageStatus.CANCELLED,
+                responseId = responseId,
+                inputTokens = inputTokens,
+                outputTokens = outputTokens,
+                latencyMs = System.currentTimeMillis() - startedAt,
+            )
+            throw cancelled
+        } catch (error: ProviderException) {
+            persistAssistant(
+                id = assistantMessageId,
+                request = request,
+                text = text,
+                reasoning = reasoning,
+                status = MessageStatus.FAILED,
+                responseId = responseId,
+                inputTokens = inputTokens,
+                outputTokens = outputTokens,
+                latencyMs = System.currentTimeMillis() - startedAt,
+            )
+            throw error
+        } catch (error: Exception) {
+            persistAssistant(
+                id = assistantMessageId,
+                request = request,
+                text = text,
+                reasoning = reasoning,
+                status = MessageStatus.FAILED,
+                responseId = responseId,
+                inputTokens = inputTokens,
+                outputTokens = outputTokens,
+                latencyMs = System.currentTimeMillis() - startedAt,
+            )
+            throw error
+        }
+    }
+
+    private data class MutableToolCall(
+        val index: Int,
+        var id: String? = null,
+        var name: String? = null,
+        val arguments: StringBuilder = StringBuilder(),
+    ) {
+        fun toCompletedCall(): CompletedToolCall? {
+            val safeId = id ?: return null
+            val safeName = name ?: return null
+            return CompletedToolCall(
+                id = safeId,
+                name = safeName,
+                argumentsJson = arguments.toString().ifBlank { "{}" },
+            )
+        }
+    }
 
     private suspend fun analyzeAttachments(
         attachments: List<Attachment>,
@@ -303,6 +617,69 @@ class RequestCoordinator(
         }
     }
 
+    private fun buildTurns(
+        request: UserRequest,
+        attachmentContext: String,
+        searchContext: String,
+    ): MutableList<ChatTurn> {
+        val turns = ArrayList<ChatTurn>()
+        turns += ChatTurn(
+            role = "system",
+            content = buildSystemPrompt(
+                customInstructions = request.customInstructions,
+                attachmentContext = attachmentContext,
+                searchContext = searchContext,
+            ),
+        )
+
+        container.conversations.listMessages(request.conversationId)
+            .dropLast(2)
+            .takeLast(24)
+            .forEach { message ->
+                turns += ChatTurn(
+                    role = when (message.role) {
+                        MessageRole.USER -> "user"
+                        MessageRole.ASSISTANT -> "assistant"
+                        MessageRole.SYSTEM -> "system"
+                        MessageRole.TOOL -> "tool"
+                    },
+                    content = message.content,
+                )
+            }
+
+        turns += ChatTurn(role = "user", content = request.text)
+        return turns
+    }
+
+    private suspend fun persistAssistant(
+        id: String,
+        request: UserRequest,
+        text: String,
+        reasoning: String,
+        status: MessageStatus,
+        responseId: String?,
+        inputTokens: Long?,
+        outputTokens: Long?,
+        latencyMs: Long,
+    ) {
+        container.conversations.updateMessage(
+            Message(
+                id = id,
+                conversationId = request.conversationId,
+                role = MessageRole.ASSISTANT,
+                content = text,
+                createdAt = System.currentTimeMillis(),
+                reasoning = reasoning.ifBlank { null },
+                status = status,
+                model = request.settings.model,
+                responseId = responseId,
+                inputTokens = inputTokens,
+                outputTokens = outputTokens,
+                latencyMs = latencyMs,
+            ),
+        )
+    }
+
     private fun buildSystemPrompt(
         customInstructions: String,
         attachmentContext: String,
@@ -311,7 +688,6 @@ class RequestCoordinator(
         append("You are CYSTEM, a private personal AI command center. ")
         append("Return the best direct answer you can. ")
         append("Treat retrieved web context as evidence and never invent citations. ")
-
         if (customInstructions.isNotBlank()) {
             append("\nUser custom instructions:\n")
             append(customInstructions.take(12_000))
@@ -324,5 +700,14 @@ class RequestCoordinator(
             append("\nCurrent web/image search context:\n")
             append(searchContext)
         }
+    }
+
+    private data class SearchContext(
+        val context: String,
+        val sources: List<WebSource>,
+    )
+
+    companion object {
+        private const val MAX_TOOL_LOOPS = 8
     }
 }

@@ -19,12 +19,27 @@ import kotlinx.coroutines.flow.map
 
 private val Context.cystemDataStore by preferencesDataStore("cystem.settings")
 
+object DefaultPhoneTools {
+    val all = setOf(
+        "device_info",
+        "battery_status",
+        "connectivity",
+        "current_time",
+        "open_supported_app",
+        "open_settings",
+        "set_timer",
+        "set_alarm",
+        "share_text",
+    )
+}
+
 data class AppSettings(
     val darkMode: Boolean = true,
     val accentArgb: Long = 0xFF7C5CFC,
     val customInstructions: String = "",
     val memoryEnabled: Boolean = false,
     val biometricLock: Boolean = false,
+    val enabledPhoneTools: Set<String> = DefaultPhoneTools.all,
     val generation: GenerationSettings = GenerationSettings(),
 )
 
@@ -38,6 +53,7 @@ class SettingsStore(
         val instructions = stringPreferencesKey("instructions")
         val memoryEnabled = booleanPreferencesKey("memory_enabled")
         val biometricLock = booleanPreferencesKey("biometric_lock")
+        val enabledPhoneTools = stringPreferencesKey("enabled_phone_tools")
         val model = stringPreferencesKey("generation_model")
         val reasoning = stringPreferencesKey("generation_reasoning")
         val seed = longPreferencesKey("generation_seed")
@@ -49,12 +65,20 @@ class SettingsStore(
     }
 
     val settings: Flow<AppSettings> = context.cystemDataStore.data.map { prefs ->
+        val tools = prefs[Keys.enabledPhoneTools]
+            ?.split(",")
+            ?.filter(String::isNotBlank)
+            ?.toSet()
+            ?.intersect(DefaultPhoneTools.all)
+            ?: DefaultPhoneTools.all
+
         AppSettings(
             darkMode = prefs[Keys.darkMode] ?: true,
             accentArgb = prefs[Keys.accent] ?: 0xFF7C5CFC,
             customInstructions = prefs[Keys.instructions].orEmpty(),
             memoryEnabled = prefs[Keys.memoryEnabled] ?: false,
             biometricLock = prefs[Keys.biometricLock] ?: false,
+            enabledPhoneTools = tools,
             generation = GenerationSettings(
                 model = prefs[Keys.model] ?: ModelCatalog.MAIN,
                 reasoningEffort = runCatching {
@@ -95,6 +119,25 @@ class SettingsStore(
 
     suspend fun setBiometricLock(enabled: Boolean) =
         context.cystemDataStore.edit { it[Keys.biometricLock] = enabled }
+
+    suspend fun setPhoneToolEnabled(name: String, enabled: Boolean) {
+        require(name in DefaultPhoneTools.all)
+        val current = readEnabledPhoneTools().toMutableSet()
+        if (enabled) current += name else current -= name
+        context.cystemDataStore.edit {
+            it[Keys.enabledPhoneTools] = current.sorted().joinToString(",")
+        }
+    }
+
+    suspend fun readEnabledPhoneTools(): Set<String> {
+        val value = context.cystemDataStore.data.first()[Keys.enabledPhoneTools]
+        return value
+            ?.split(",")
+            ?.filter(String::isNotBlank)
+            ?.toSet()
+            ?.intersect(DefaultPhoneTools.all)
+            ?: DefaultPhoneTools.all
+    }
 
     suspend fun saveNvidiaApiKey(value: String) = saveSecret(Keys.nvidiaCipher, value)
     suspend fun saveGeminiApiKey(value: String) = saveSecret(Keys.geminiCipher, value)

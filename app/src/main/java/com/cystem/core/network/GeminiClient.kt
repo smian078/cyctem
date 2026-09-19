@@ -209,7 +209,7 @@ class GeminiClient(
             textContext = text,
             images = images.distinctBy { it.imageUrl }.take(12),
             sources = parseWebSources(metadata),
-            searchQueries = metadata?.optJSONArray("webSearchQueries").toStringList(),
+            searchQueries = metadata?.optJSONArray("webSearchQueries")?.toStringList().orEmpty(),
             searchSuggestionsHtml = suggestions,
         )
     }

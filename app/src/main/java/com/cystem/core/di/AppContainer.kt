@@ -1,6 +1,8 @@
 package com.cystem.core.di
 
 import android.content.Context
+import com.cystem.core.attachments.AttachmentStore
+import com.cystem.core.attachments.ImageSearchDownloader
 import com.cystem.core.coordinator.RequestCoordinator
 import com.cystem.core.security.SecureKeyStore
 import com.cystem.core.settings.SettingsStore
@@ -15,6 +17,9 @@ class AppContainer(context: Context) {
     val settingsStore = SettingsStore(context, secureKeyStore)
     val database = CystemDatabase(context)
     val conversations = ConversationRepository(database)
+
+    val attachmentStore = AttachmentStore(context)
+    val imageSearchDownloader = ImageSearchDownloader(attachmentStore)
 
     val phoneActionDispatcher = PhoneActionDispatcher()
     val phoneTools = PhoneToolRegistry(context.applicationContext, phoneActionDispatcher)

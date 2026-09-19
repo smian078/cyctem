@@ -27,6 +27,7 @@ sealed interface PipelineEvent {
     data class TextDelta(val delta: String) : PipelineEvent
     data class ReasoningDelta(val delta: String) : PipelineEvent
     data class SourceFound(val source: WebSource) : PipelineEvent
+    data class AttachmentFound(val attachment: Attachment) : PipelineEvent
     data class ToolCallStarted(
         val id: String,
         val name: String,

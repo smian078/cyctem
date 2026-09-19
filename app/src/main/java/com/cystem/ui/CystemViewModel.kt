@@ -2,28 +2,38 @@ package com.cystem.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.cystem.core.coordinator.PipelineEvent
+import com.cystem.core.coordinator.UserRequest
 import com.cystem.core.di.AppContainer
 import com.cystem.core.model.Conversation
+import com.cystem.core.model.GenerationSettings
 import com.cystem.core.model.Message
-import com.cystem.core.model.MessageRole
 import com.cystem.core.storage.ConversationTitles
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 data class CystemUiState(
     val conversations: List<Conversation> = emptyList(),
     val activeConversationId: String? = null,
+    val messages: List<Message> = emptyList(),
     val draft: String = "",
+    val streamingText: String = "",
+    val streamingReasoning: String = "",
+    val sources: List<com.cystem.core.network.WebSource> = emptyList(),
+    val stage: String? = null,
+    val processing: Boolean = false,
+    val error: String? = null,
     val customInstructions: String = "",
     val accentArgb: Long = 0xFF7C5CFC,
     val darkMode: Boolean = true,
     val bootVisible: Boolean = true,
+    val generation: GenerationSettings = GenerationSettings(),
 )
 
 class CystemViewModel(
@@ -40,11 +50,12 @@ class CystemViewModel(
                     customInstructions = settings.customInstructions,
                     accentArgb = settings.accentArgb,
                     darkMode = settings.darkMode,
+                    generation = settings.generation,
                 )
             }
         }
         viewModelScope.launch {
-            delay(1200)
+            kotlinx.coroutines.delay(1200)
             skipBoot()
         }
     }
@@ -53,6 +64,14 @@ class CystemViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             mutable.value = mutable.value.copy(
                 conversations = container.conversations.listConversations(),
+            )
+        }
+    }
+
+    private fun refreshMessages(conversationId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            mutable.value = mutable.value.copy(
+                messages = container.conversations.listMessages(conversationId),
             )
         }
     }
@@ -67,13 +86,25 @@ class CystemViewModel(
             mutable.value = mutable.value.copy(
                 conversations = container.conversations.listConversations(),
                 activeConversationId = conversation.id,
-                draft = "",
+                messages = emptyList(),
+                streamingText = "",
+                streamingReasoning = "",
+                sources = emptyList(),
+                error = null,
             )
         }
     }
 
     fun selectConversation(id: String) {
-        mutable.value = mutable.value.copy(activeConversationId = id)
+        mutable.value = mutable.value.copy(
+            activeConversationId = id,
+            messages = emptyList(),
+            streamingText = "",
+            streamingReasoning = "",
+            sources = emptyList(),
+            error = null,
+        )
+        refreshMessages(id)
     }
 
     fun renameConversation(id: String, title: String) {
@@ -89,28 +120,40 @@ class CystemViewModel(
         }
     }
 
+    fun pinConversation(id: String, pinned: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            container.conversations.setPinned(id, pinned, System.currentTimeMillis())
+            mutable.value = mutable.value.copy(
+                conversations = container.conversations.listConversations(),
+            )
+        }
+    }
+
     fun deleteConversation(id: String) {
         viewModelScope.launch(Dispatchers.IO) {
             container.conversations.deleteConversation(id)
+            val nextConversation = container.conversations.listConversations().firstOrNull()
             mutable.value = mutable.value.copy(
                 conversations = container.conversations.listConversations(),
-                activeConversationId = mutable.value.activeConversationId.takeUnless { it == id },
+                activeConversationId = nextConversation?.id,
+                messages = nextConversation?.let { container.conversations.listMessages(it.id) }.orEmpty(),
             )
         }
     }
 
     fun importSharedText(text: String) {
-        ensureConversationThen { conversationId ->
-            insertUserMessage(conversationId, text)
+        if (text.isBlank()) return
+        ensureConversationThen { id ->
+            sendToCoordinator(id, text)
         }
     }
 
     fun sendDraft() {
         val text = mutable.value.draft.trim()
-        if (text.isBlank()) return
-        ensureConversationThen { conversationId ->
-            insertUserMessage(conversationId, text)
-            mutable.value = mutable.value.copy(draft = "")
+        if (text.isBlank() || mutable.value.processing) return
+        mutable.value = mutable.value.copy(draft = "")
+        ensureConversationThen { id ->
+            sendToCoordinator(id, text)
         }
     }
 
@@ -130,6 +173,14 @@ class CystemViewModel(
         container.settingsStore.setAccent(value)
     }
 
+    suspend fun saveGeneration(value: GenerationSettings) {
+        container.settingsStore.saveGeneration(value)
+    }
+
+    fun clearError() {
+        mutable.value = mutable.value.copy(error = null)
+    }
+
     private fun ensureConversationThen(action: (String) -> Unit) {
         val active = mutable.value.activeConversationId
         if (active != null) {
@@ -141,31 +192,99 @@ class CystemViewModel(
             mutable.value = mutable.value.copy(
                 conversations = container.conversations.listConversations(),
                 activeConversationId = conversation.id,
+                messages = emptyList(),
             )
             action(conversation.id)
         }
     }
 
-    private fun insertUserMessage(conversationId: String, text: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val now = System.currentTimeMillis()
-            container.conversations.insertMessage(
-                Message(
-                    id = UUID.randomUUID().toString(),
-                    conversationId = conversationId,
-                    role = MessageRole.USER,
-                    content = text,
-                    createdAt = now,
-                ),
-            )
-            container.conversations.renameConversation(
-                id = conversationId,
-                title = ConversationTitles.fromFirstMessage(text),
-                now = now,
-            )
+    private fun sendToCoordinator(conversationId: String, text: String) {
+        val state = mutable.value
+        if (state.processing) return
+
+        viewModelScope.launch {
             mutable.value = mutable.value.copy(
-                conversations = container.conversations.listConversations(),
+                processing = true,
+                stage = "Preparing request",
+                streamingText = "",
+                streamingReasoning = "",
+                sources = emptyList(),
+                error = null,
             )
+
+            val request = UserRequest(
+                conversationId = conversationId,
+                text = text,
+                settings = state.generation,
+                customInstructions = state.customInstructions,
+            )
+
+            try {
+                container.coordinator.run(request).collectLatest { event ->
+                    when (event) {
+                        is PipelineEvent.Stage ->
+                            mutable.value = mutable.value.copy(stage = event.name)
+
+                        PipelineEvent.ResetStreaming ->
+                            mutable.value = mutable.value.copy(
+                                streamingText = "",
+                                streamingReasoning = "",
+                            )
+
+                        is PipelineEvent.TextDelta ->
+                            mutable.value = mutable.value.copy(
+                                streamingText = mutable.value.streamingText + event.delta,
+                            )
+
+                        is PipelineEvent.ReasoningDelta ->
+                            mutable.value = mutable.value.copy(
+                                streamingReasoning = mutable.value.streamingReasoning + event.delta,
+                            )
+
+                        is PipelineEvent.SourceFound ->
+                            mutable.value = mutable.value.copy(
+                                sources = (mutable.value.sources + event.source)
+                                    .distinctBy { it.url }
+                                    .take(12),
+                            )
+
+                        is PipelineEvent.ToolCallStarted,
+                        is PipelineEvent.ToolCallFinished -> Unit
+
+                        is PipelineEvent.Completed -> {
+                            mutable.value = mutable.value.copy(
+                                processing = false,
+                                stage = null,
+                                streamingText = "",
+                                streamingReasoning = "",
+                            )
+                            val latest = withContext(Dispatchers.IO) {
+                                container.conversations.listMessages(conversationId)
+                            }
+                            mutable.value = mutable.value.copy(messages = latest)
+                            refreshConversations()
+                        }
+
+                        is PipelineEvent.Failed -> {
+                            mutable.value = mutable.value.copy(
+                                processing = false,
+                                stage = null,
+                                error = event.message,
+                            )
+                            val latest = withContext(Dispatchers.IO) {
+                                container.conversations.listMessages(conversationId)
+                            }
+                            mutable.value = mutable.value.copy(messages = latest)
+                        }
+                    }
+                }
+            } catch (error: Exception) {
+                mutable.value = mutable.value.copy(
+                    processing = false,
+                    stage = null,
+                    error = error.message ?: "Request failed",
+                )
+            }
         }
     }
 }

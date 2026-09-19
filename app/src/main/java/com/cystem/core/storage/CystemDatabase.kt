@@ -346,6 +346,36 @@ class ConversationRepository(private val database: CystemDatabase) {
         }
         return result
     }
+
+    fun insertToolCall(record: ToolCallRecord) {
+        database.writable().insertOrThrow(
+            "tool_calls",
+            null,
+            ContentValues().apply {
+                put("id", record.id)
+                put("message_id", record.messageId)
+                put("name", record.name)
+                put("arguments_json", record.argumentsJson)
+                put("result", record.result)
+                put("status", record.status)
+                put("created_at", record.createdAt)
+                record.finishedAt?.let { put("finished_at", it) }
+            },
+        )
+    }
+
+    fun updateToolCall(record: ToolCallRecord) {
+        database.writable().update(
+            "tool_calls",
+            ContentValues().apply {
+                put("result", record.result)
+                put("status", record.status)
+                record.finishedAt?.let { put("finished_at", it) }
+            },
+            "id = ?",
+            arrayOf(record.id),
+        )
+    }
 }
 
 private fun Cursor.getLongOrNull(index: Int): Long? =

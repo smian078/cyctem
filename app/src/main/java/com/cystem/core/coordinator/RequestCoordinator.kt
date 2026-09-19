@@ -139,7 +139,7 @@ class RequestCoordinator(
                 initialResponseId = null,
                 initialInputTokens = null,
                 initialOutputTokens = null,
-                emit = emit,
+                emit = { event -> emit(event) },
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -227,7 +227,7 @@ class RequestCoordinator(
                 initialResponseId = pending.responseId,
                 initialInputTokens = pending.inputTokens,
                 initialOutputTokens = pending.outputTokens,
-                emit = emit,
+                emit = { event -> emit(event) },
             )
         } catch (error: ProviderException) {
             emit(PipelineEvent.Failed(error.messageForUser, error.retryable))
@@ -499,7 +499,7 @@ class RequestCoordinator(
                 initialResponseId = responseId,
                 initialInputTokens = inputTokens,
                 initialOutputTokens = outputTokens,
-                emit = emit,
+                emit = { event -> emit(event) },
             )
         } catch (cancelled: CancellationException) {
             persistAssistant(

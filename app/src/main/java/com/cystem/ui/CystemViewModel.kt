@@ -16,8 +16,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.withContext
 
 data class CystemUiState(
@@ -168,10 +170,10 @@ class CystemViewModel(
 
     fun stopGeneration() {
         val job = activeGenerationJob ?: return
-        job.cancel()
         activeGenerationJob = null
-        val active = mutable.value.activeConversationId
         viewModelScope.launch {
+            job.cancelAndJoin()
+            val active = mutable.value.activeConversationId
             val pair = active?.let { readMessages(it) }
             mutable.value = mutable.value.copy(
                 processing = false,

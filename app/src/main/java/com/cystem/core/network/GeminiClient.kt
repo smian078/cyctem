@@ -166,7 +166,7 @@ class GeminiClient(
         return SearchResponse(
             answerContext = text,
             sources = parseWebSources(metadata),
-            searchQueries = metadata?.optJSONArray("webSearchQueries").toStringList(),
+            searchQueries = metadata?.optJSONArray("webSearchQueries")?.toStringList().orEmpty(),
         )
     }
 

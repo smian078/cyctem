@@ -43,7 +43,9 @@ data class ToolDefinition(
 
         properties.forEach { property ->
             if (property.required && !args.has(property.name)) {
-                throw RequiredToolArgumentMissing(property.name)
+                return ToolValidationResult.Invalid(
+                    "Missing required argument: " + property.name,
+                )
             }
             if (!args.has(property.name)) return@forEach
 
@@ -139,7 +141,3 @@ data class ToolDefinition(
             )
     }
 }
-
-class RequiredToolArgumentMissing(val propertyName: String) : IllegalArgumentException(
-    "Missing required argument: " + propertyName,
-)

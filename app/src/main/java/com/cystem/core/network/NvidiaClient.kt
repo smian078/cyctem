@@ -79,7 +79,12 @@ class NvidiaClient(
                 },
             )
         }
-        if (tools.isNotEmpty()) payload.put("tools", JSONArray(tools))
+        if (tools.isNotEmpty()) {
+            payload.put(
+                "tools",
+                JSONArray().apply { tools.forEach(::put) },
+            )
+        }
 
         val request = Request.Builder()
             .url("$BASE_URL/chat/completions")

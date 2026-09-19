@@ -49,6 +49,8 @@ class RequestCoordinator(
         val responseId: String?,
         val inputTokens: Long?,
         val outputTokens: Long?,
+        val searchSources: List<WebSource>,
+        val searchAttachments: List<Attachment>,
     )
 
     private val pendingTools = ConcurrentHashMap<String, PendingTool>()
@@ -121,6 +123,7 @@ class RequestCoordinator(
                 turns = turns,
                 assistantMessageId = assistantMessageId,
                 searchSources = search.sources,
+                searchAttachments = search.attachments,
                 loop = 0,
                 startedAt = startedAt,
                 initialText = "",
@@ -149,11 +152,12 @@ class RequestCoordinator(
             return@flow
         }
 
-        val args = runCatching { JSONObject(pending.toolCall.argumentsJson.ifBlank { "{}" }) }
-            .getOrElse {
-                emit(PipelineEvent.Failed("The tool arguments are no longer valid.", false))
-                return@flow
-            }
+        val args = runCatching {
+            JSONObject(pending.toolCall.argumentsJson.ifBlank { "{}" })
+        }.getOrElse {
+            emit(PipelineEvent.Failed("The tool arguments are no longer valid.", false))
+            return@flow
+        }
 
         val result = if (!approved) {
             ToolResult.Failure("The user declined the requested action.")
@@ -206,7 +210,8 @@ class RequestCoordinator(
                 nvidiaKey = pending.nvidiaKey,
                 turns = pending.turns,
                 assistantMessageId = pending.assistantMessageId,
-                searchSources = emptyList(),
+                searchSources = pending.searchSources,
+                searchAttachments = pending.searchAttachments,
                 loop = pending.loop + 1,
                 startedAt = pending.startedAt,
                 initialText = pending.text,
@@ -229,6 +234,7 @@ class RequestCoordinator(
         turns: MutableList<ChatTurn>,
         assistantMessageId: String,
         searchSources: List<WebSource>,
+        searchAttachments: List<Attachment>,
         loop: Int,
         startedAt: Long,
         initialText: String,
@@ -335,6 +341,15 @@ class RequestCoordinator(
                     )
                 }
 
+                searchAttachments.forEach { attachment ->
+                    container.conversations.insertAttachment(attachment)
+                    container.conversations.attachToMessage(
+                        messageId = assistantMessageId,
+                        attachmentId = attachment.id,
+                    )
+                    emit(PipelineEvent.AttachmentFound(attachment))
+                }
+
                 emit(
                     PipelineEvent.Completed(
                         model = request.settings.model,
@@ -377,12 +392,7 @@ class RequestCoordinator(
                     ),
                 )
 
-                val toolResult = container.toolExecutor.execute(
-                    name = call.name,
-                    argumentsJson = call.argumentsJson,
-                )
-
-                when (toolResult) {
+                when (val toolResult = container.toolExecutor.execute(call.name, call.argumentsJson)) {
                     is ToolResult.ConfirmationRequired -> {
                         container.conversations.updateToolCall(
                             ToolCallRecord(
@@ -402,6 +412,7 @@ class RequestCoordinator(
                             toolName = call.name,
                             prompt = toolResult.prompt,
                         )
+
                         pendingTools[confirmation.confirmationId] = PendingTool(
                             confirmation = confirmation,
                             request = request,
@@ -417,13 +428,11 @@ class RequestCoordinator(
                             responseId = responseId,
                             inputTokens = inputTokens,
                             outputTokens = outputTokens,
+                            searchSources = searchSources,
+                            searchAttachments = searchAttachments,
                         )
 
-                        emit(
-                            PipelineEvent.ToolConfirmationRequired(
-                                confirmation = confirmation,
-                            ),
-                        )
+                        emit(PipelineEvent.ToolConfirmationRequired(confirmation))
                         return
                     }
 
@@ -433,7 +442,7 @@ class RequestCoordinator(
                         val output = when (toolResult) {
                             is ToolResult.Success -> toolResult.output
                             is ToolResult.Failure -> toolResult.message
-                            else -> error("unreachable")
+                            is ToolResult.ConfirmationRequired -> error("unreachable")
                         }
 
                         container.conversations.updateToolCall(
@@ -474,6 +483,7 @@ class RequestCoordinator(
                 turns = turns,
                 assistantMessageId = assistantMessageId,
                 searchSources = searchSources,
+                searchAttachments = searchAttachments,
                 loop = loop + 1,
                 startedAt = startedAt,
                 initialText = text,
@@ -571,14 +581,23 @@ class RequestCoordinator(
         key: String,
         attachment: Attachment,
     ): String {
-        require(attachment.mimeType.startsWith("image/")) {
-            "This phase only sends image attachments to the private vision layer."
+        if (!attachment.mimeType.startsWith("image/")) {
+            val bytes = File(attachment.localPath).takeIf { it.exists() }?.readBytes().orEmpty()
+            val text = bytes.toString(Charsets.UTF_8)
+            return if (text.isNotBlank() && bytes.size <= 512 * 1024) {
+                "Text attachment " + (attachment.sourceTitle ?: attachment.localPath) + ":\n" + text.take(50_000)
+            } else {
+                "Attachment " + (attachment.sourceTitle ?: attachment.localPath) +
+                    " has MIME type " + attachment.mimeType + " and is stored locally."
+            }
         }
+
         val bytes = File(attachment.localPath).readBytes()
         require(bytes.size <= 10 * 1024 * 1024) {
             "Attachment is too large to analyze."
         }
         val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+
         return nvidia.analyzeImage(
             apiKey = key,
             imageDataUri = "data:" + attachment.mimeType + ";base64," + base64,
@@ -591,7 +610,7 @@ class RequestCoordinator(
         intent: SearchIntent,
         emit: suspend (PipelineEvent) -> Unit,
     ): SearchContext {
-        if (!intent.needsWeb) return SearchContext("", emptyList())
+        if (!intent.needsWeb) return SearchContext("", emptyList(), emptyList())
 
         val geminiKey = container.settingsStore.readGeminiApiKey()
         if (geminiKey.isNullOrBlank()) {
@@ -601,19 +620,21 @@ class RequestCoordinator(
                     false,
                 ),
             )
-            return SearchContext("", emptyList())
+            return SearchContext("", emptyList(), emptyList())
         }
 
         return if (intent.needsImages) {
             emit(PipelineEvent.Stage("Searching web and images"))
             val result = gemini.imageSearch(geminiKey, request.text)
             result.sources.forEach { emit(PipelineEvent.SourceFound(it)) }
-            SearchContext(result.textContext, result.sources)
+
+            val attachments = container.imageSearchDownloader.downloadAll(result.images)
+            SearchContext(result.textContext, result.sources, attachments)
         } else {
             emit(PipelineEvent.Stage("Searching web"))
             val result = gemini.search(geminiKey, request.text)
             result.sources.forEach { emit(PipelineEvent.SourceFound(it)) }
-            SearchContext(result.answerContext, result.sources)
+            SearchContext(result.answerContext, result.sources, emptyList())
         }
     }
 
@@ -688,6 +709,8 @@ class RequestCoordinator(
         append("You are CYSTEM, a private personal AI command center. ")
         append("Return the best direct answer you can. ")
         append("Treat retrieved web context as evidence and never invent citations. ")
+        append("Available phone tools are permission-limited and user-confirmed when they cause side effects. ")
+
         if (customInstructions.isNotBlank()) {
             append("\nUser custom instructions:\n")
             append(customInstructions.take(12_000))
@@ -705,6 +728,7 @@ class RequestCoordinator(
     private data class SearchContext(
         val context: String,
         val sources: List<WebSource>,
+        val attachments: List<Attachment>,
     )
 
     companion object {

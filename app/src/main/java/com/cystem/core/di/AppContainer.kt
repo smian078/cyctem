@@ -3,6 +3,7 @@ package com.cystem.core.di
 import android.content.Context
 import com.cystem.core.attachments.AttachmentStore
 import com.cystem.core.attachments.ImageSearchDownloader
+import com.cystem.core.backup.BackupManager
 import com.cystem.core.coordinator.RequestCoordinator
 import com.cystem.core.security.SecureKeyStore
 import com.cystem.core.settings.SettingsStore
@@ -20,6 +21,7 @@ class AppContainer(context: Context) {
 
     val attachmentStore = AttachmentStore(context)
     val imageSearchDownloader = ImageSearchDownloader(attachmentStore)
+    val backupManager = BackupManager(context, conversations)
 
     val phoneActionDispatcher = PhoneActionDispatcher()
     val phoneTools = PhoneToolRegistry(context.applicationContext, phoneActionDispatcher)

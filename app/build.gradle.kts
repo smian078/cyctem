@@ -11,8 +11,8 @@ android {
         applicationId = "com.cystem"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.2.0"
+        versionCode = 5
+        versionName = "0.5.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
@@ -66,6 +66,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
+    implementation("androidx.biometric:biometric:1.1.0")
 
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.foundation:foundation")
@@ -79,7 +80,6 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlin:kotlin-test:2.4.20")
-    testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.0")
 
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

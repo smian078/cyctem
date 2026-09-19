@@ -591,7 +591,7 @@ class RequestCoordinator(
     ): String {
         if (!attachment.mimeType.startsWith("image/")) {
             val file = File(attachment.localPath)
-            val bytes = file.takeIf { it.exists() }?.readBytes().orEmpty()
+            val bytes = if (file.exists()) file.readBytes() else ByteArray(0)
             val text = bytes.toString(Charsets.UTF_8)
             return if (text.isNotBlank() && bytes.size <= 512 * 1024) {
                 "Text attachment " + (attachment.sourceTitle ?: attachment.localPath) +

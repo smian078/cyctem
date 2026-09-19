@@ -3,6 +3,7 @@ package com.cystem.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.cystem.core.coordinator.PipelineEvent
+import com.cystem.core.coordinator.ToolConfirmation
 import com.cystem.core.coordinator.UserRequest
 import com.cystem.core.di.AppContainer
 import com.cystem.core.model.Conversation
@@ -16,7 +17,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.UUID
 
 data class CystemUiState(
     val conversations: List<Conversation> = emptyList(),
@@ -29,6 +29,7 @@ data class CystemUiState(
     val stage: String? = null,
     val processing: Boolean = false,
     val error: String? = null,
+    val pendingConfirmation: ToolConfirmation? = null,
     val customInstructions: String = "",
     val accentArgb: Long = 0xFF7C5CFC,
     val darkMode: Boolean = true,
@@ -68,6 +69,11 @@ class CystemViewModel(
         }
     }
 
+    private suspend fun readMessages(conversationId: String): List<Message> =
+        withContext(Dispatchers.IO) {
+            container.conversations.listMessages(conversationId)
+        }
+
     private fun refreshMessages(conversationId: String) {
         viewModelScope.launch(Dispatchers.IO) {
             mutable.value = mutable.value.copy(
@@ -91,6 +97,7 @@ class CystemViewModel(
                 streamingReasoning = "",
                 sources = emptyList(),
                 error = null,
+                pendingConfirmation = null,
             )
         }
     }
@@ -103,6 +110,7 @@ class CystemViewModel(
             streamingReasoning = "",
             sources = emptyList(),
             error = null,
+            pendingConfirmation = null,
         )
         refreshMessages(id)
     }
@@ -132,28 +140,41 @@ class CystemViewModel(
     fun deleteConversation(id: String) {
         viewModelScope.launch(Dispatchers.IO) {
             container.conversations.deleteConversation(id)
-            val nextConversation = container.conversations.listConversations().firstOrNull()
+            val conversations = container.conversations.listConversations()
+            val next = conversations.firstOrNull()
             mutable.value = mutable.value.copy(
-                conversations = container.conversations.listConversations(),
-                activeConversationId = nextConversation?.id,
-                messages = nextConversation?.let { container.conversations.listMessages(it.id) }.orEmpty(),
+                conversations = conversations,
+                activeConversationId = next?.id,
+                messages = next?.let { container.conversations.listMessages(it.id) }.orEmpty(),
+                pendingConfirmation = null,
             )
         }
     }
 
     fun importSharedText(text: String) {
         if (text.isBlank()) return
-        ensureConversationThen { id ->
-            sendToCoordinator(id, text)
-        }
+        ensureConversationThen { id -> sendToCoordinator(id, text) }
     }
 
     fun sendDraft() {
         val text = mutable.value.draft.trim()
         if (text.isBlank() || mutable.value.processing) return
         mutable.value = mutable.value.copy(draft = "")
-        ensureConversationThen { id ->
-            sendToCoordinator(id, text)
+        ensureConversationThen { id -> sendToCoordinator(id, text) }
+    }
+
+    fun confirmTool(approved: Boolean) {
+        val confirmation = mutable.value.pendingConfirmation ?: return
+        mutable.value = mutable.value.copy(
+            pendingConfirmation = null,
+            processing = true,
+            stage = if (approved) "Running confirmed action" else "Declining action",
+            error = null,
+        )
+        viewModelScope.launch {
+            container.coordinator
+                .resumeToolConfirmation(confirmation.confirmationId, approved)
+                .collectLatest(::handlePipelineEvent)
         }
     }
 
@@ -175,6 +196,10 @@ class CystemViewModel(
 
     suspend fun saveGeneration(value: GenerationSettings) {
         container.settingsStore.saveGeneration(value)
+    }
+
+    suspend fun setPhoneToolEnabled(name: String, enabled: Boolean) {
+        container.settingsStore.setPhoneToolEnabled(name, enabled)
     }
 
     fun clearError() {
@@ -210,6 +235,7 @@ class CystemViewModel(
                 streamingReasoning = "",
                 sources = emptyList(),
                 error = null,
+                pendingConfirmation = null,
             )
 
             val request = UserRequest(
@@ -220,69 +246,85 @@ class CystemViewModel(
             )
 
             try {
-                container.coordinator.run(request).collectLatest { event ->
-                    when (event) {
-                        is PipelineEvent.Stage ->
-                            mutable.value = mutable.value.copy(stage = event.name)
-
-                        PipelineEvent.ResetStreaming ->
-                            mutable.value = mutable.value.copy(
-                                streamingText = "",
-                                streamingReasoning = "",
-                            )
-
-                        is PipelineEvent.TextDelta ->
-                            mutable.value = mutable.value.copy(
-                                streamingText = mutable.value.streamingText + event.delta,
-                            )
-
-                        is PipelineEvent.ReasoningDelta ->
-                            mutable.value = mutable.value.copy(
-                                streamingReasoning = mutable.value.streamingReasoning + event.delta,
-                            )
-
-                        is PipelineEvent.SourceFound ->
-                            mutable.value = mutable.value.copy(
-                                sources = (mutable.value.sources + event.source)
-                                    .distinctBy { it.url }
-                                    .take(12),
-                            )
-
-                        is PipelineEvent.ToolCallStarted,
-                        is PipelineEvent.ToolCallFinished -> Unit
-
-                        is PipelineEvent.Completed -> {
-                            mutable.value = mutable.value.copy(
-                                processing = false,
-                                stage = null,
-                                streamingText = "",
-                                streamingReasoning = "",
-                            )
-                            val latest = withContext(Dispatchers.IO) {
-                                container.conversations.listMessages(conversationId)
-                            }
-                            mutable.value = mutable.value.copy(messages = latest)
-                            refreshConversations()
-                        }
-
-                        is PipelineEvent.Failed -> {
-                            mutable.value = mutable.value.copy(
-                                processing = false,
-                                stage = null,
-                                error = event.message,
-                            )
-                            val latest = withContext(Dispatchers.IO) {
-                                container.conversations.listMessages(conversationId)
-                            }
-                            mutable.value = mutable.value.copy(messages = latest)
-                        }
-                    }
-                }
+                container.coordinator.run(request).collectLatest(::handlePipelineEvent)
             } catch (error: Exception) {
                 mutable.value = mutable.value.copy(
                     processing = false,
                     stage = null,
                     error = error.message ?: "Request failed",
+                )
+            }
+        }
+    }
+
+    private suspend fun handlePipelineEvent(event: PipelineEvent) {
+        when (event) {
+            is PipelineEvent.Stage ->
+                mutable.value = mutable.value.copy(stage = event.name)
+
+            PipelineEvent.ResetStreaming ->
+                mutable.value = mutable.value.copy(
+                    streamingText = "",
+                    streamingReasoning = "",
+                )
+
+            is PipelineEvent.TextDelta ->
+                mutable.value = mutable.value.copy(
+                    streamingText = mutable.value.streamingText + event.delta,
+                )
+
+            is PipelineEvent.ReasoningDelta ->
+                mutable.value = mutable.value.copy(
+                    streamingReasoning = mutable.value.streamingReasoning + event.delta,
+                )
+
+            is PipelineEvent.SourceFound ->
+                mutable.value = mutable.value.copy(
+                    sources = (mutable.value.sources + event.source)
+                        .distinctBy { it.url }
+                        .take(12),
+                )
+
+            is PipelineEvent.ToolCallStarted ->
+                mutable.value = mutable.value.copy(
+                    stage = "Tool: " + event.name,
+                )
+
+            is PipelineEvent.ToolConfirmationRequired ->
+                mutable.value = mutable.value.copy(
+                    pendingConfirmation = event.confirmation,
+                    processing = false,
+                    stage = "Awaiting confirmation",
+                )
+
+            is PipelineEvent.ToolCallFinished ->
+                mutable.value = mutable.value.copy(
+                    stage = "Continuing",
+                )
+
+            is PipelineEvent.Completed -> {
+                val active = mutable.value.activeConversationId
+                val latest = active?.let { readMessages(it) }.orEmpty()
+                mutable.value = mutable.value.copy(
+                    processing = false,
+                    stage = null,
+                    streamingText = "",
+                    streamingReasoning = "",
+                    pendingConfirmation = null,
+                    messages = latest,
+                )
+                refreshConversations()
+            }
+
+            is PipelineEvent.Failed -> {
+                val active = mutable.value.activeConversationId
+                val latest = active?.let { readMessages(it) }.orEmpty()
+                mutable.value = mutable.value.copy(
+                    processing = false,
+                    stage = null,
+                    pendingConfirmation = null,
+                    error = event.message,
+                    messages = latest,
                 )
             }
         }

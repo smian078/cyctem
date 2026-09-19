@@ -10,6 +10,7 @@ data class UserRequest(
     val attachments: List<Attachment> = emptyList(),
     val forceSearch: Boolean = false,
     val forceImageSearch: Boolean = false,
+    val autoWebSearch: Boolean = true,
     val settings: GenerationSettings,
     val customInstructions: String = "",
 )

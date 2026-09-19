@@ -98,6 +98,14 @@ class RequestCoordinator(
             )
             container.conversations.insertMessage(userMessage)
 
+            request.attachments.forEach { attachment ->
+                container.conversations.insertAttachment(attachment)
+                container.conversations.attachToMessage(
+                    messageId = userMessage.id,
+                    attachmentId = attachment.id,
+                )
+            }
+
             val assistantMessageId = UUID.randomUUID().toString()
             container.conversations.insertMessage(
                 Message(
@@ -582,10 +590,12 @@ class RequestCoordinator(
         attachment: Attachment,
     ): String {
         if (!attachment.mimeType.startsWith("image/")) {
-            val bytes = File(attachment.localPath).takeIf { it.exists() }?.readBytes().orEmpty()
+            val file = File(attachment.localPath)
+            val bytes = file.takeIf { it.exists() }?.readBytes().orEmpty()
             val text = bytes.toString(Charsets.UTF_8)
             return if (text.isNotBlank() && bytes.size <= 512 * 1024) {
-                "Text attachment " + (attachment.sourceTitle ?: attachment.localPath) + ":\n" + text.take(50_000)
+                "Text attachment " + (attachment.sourceTitle ?: attachment.localPath) +
+                    ":\n" + text.take(50_000)
             } else {
                 "Attachment " + (attachment.sourceTitle ?: attachment.localPath) +
                     " has MIME type " + attachment.mimeType + " and is stored locally."
@@ -629,6 +639,8 @@ class RequestCoordinator(
             result.sources.forEach { emit(PipelineEvent.SourceFound(it)) }
 
             val attachments = container.imageSearchDownloader.downloadAll(result.images)
+            attachments.forEach { emit(PipelineEvent.AttachmentFound(it)) }
+
             SearchContext(result.textContext, result.sources, attachments)
         } else {
             emit(PipelineEvent.Stage("Searching web"))

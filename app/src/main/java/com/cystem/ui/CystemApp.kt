@@ -15,16 +15,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -53,7 +52,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -152,6 +151,7 @@ private fun CystemShell(
                 onDraftChange = viewModel::setDraft,
                 onSend = viewModel::sendDraft,
                 onDismissError = viewModel::clearError,
+                onConfirmTool = viewModel::confirmTool,
                 modifier = Modifier.padding(padding),
             )
         }
@@ -258,6 +258,7 @@ private fun SystemConsole(
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
     onDismissError: () -> Unit,
+    onConfirmTool: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -271,9 +272,7 @@ private fun SystemConsole(
                 .fillMaxWidth()
                 .weight(1f),
         ) {
-            GridBackdrop(
-                modifier = Modifier.fillMaxSize(),
-            )
+            GridBackdrop(Modifier.fillMaxSize())
 
             LazyColumn(
                 modifier = Modifier.fillMaxWidth(),
@@ -313,6 +312,14 @@ private fun SystemConsole(
             }
         }
 
+        state.pendingConfirmation?.let { confirmation ->
+            ConfirmationCard(
+                confirmation = confirmation,
+                onConfirm = { onConfirmTool(true) },
+                onCancel = { onConfirmTool(false) },
+            )
+        }
+
         AnimatedVisibility(
             visible = state.error != null,
             enter = fadeIn(),
@@ -330,8 +337,45 @@ private fun SystemConsole(
             value = state.draft,
             onValueChange = onDraftChange,
             onSend = onSend,
-            enabled = !state.processing,
+            enabled = !state.processing && state.pendingConfirmation == null,
         )
+    }
+}
+
+@Composable
+private fun ConfirmationCard(
+    confirmation: com.cystem.core.coordinator.ToolConfirmation,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .animateContentSize(),
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        tonalElevation = 6.dp,
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                "CONFIRM ACTION",
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 2.sp,
+            )
+            Text(confirmation.prompt)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = onCancel) { Text("Cancel") }
+                TextButton(onClick = onConfirm) { Text("Confirm") }
+            }
+        }
     }
 }
 

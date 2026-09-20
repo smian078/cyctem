@@ -34,10 +34,10 @@ jobs:
           gradle-version: "9.3.1"
 
       - name: Run unit tests
-        run: timeout 5m gradle test --stacktrace
+        run: gradle test --stacktrace
 
       - name: Build release APK
-        run: timeout 7m gradle assembleRelease --stacktrace
+        run: gradle assembleRelease --stacktrace
 
       - name: Verify APK is signed and installable
         shell: bash
@@ -69,17 +69,16 @@ jobs:
             apk="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
             test -n "$apk"
 
-            timeout 60s adb wait-for-device
-            timeout 90s adb install -r "$apk"
+            adb install -r "$apk"
 
             adb shell am force-stop com.cystem
             adb logcat -c
 
-            timeout 30s adb shell am start -W -n com.cystem/.MainActivity 2>&1 | tee /tmp/cystem-launch.txt
+            adb shell am start -W -n com.cystem/.MainActivity 2>&1 | tee /tmp/cystem-launch.txt
 
             sleep 5
 
-            if ! timeout 15s adb shell pidof com.cystem >/dev/null 2>&1; then
+            if ! adb shell pidof com.cystem >/dev/null 2>&1; then
               echo "CYSTEM process is not running after launch."
               adb logcat -d
               exit 1

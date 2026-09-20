@@ -15,6 +15,8 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -32,23 +34,10 @@ jobs:
           gradle-version: "9.3.1"
 
       - name: Run unit tests
-        run: gradle test
-
-      - name: Run release startup smoke test
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 35
-          target: google_apis
-          arch: x86_64
-          profile: pixel_2
-          cores: 2
-          ram-size: 2048M
-          heap-size: 512M
-          disable-animations: true
-          script: gradle connectedReleaseAndroidTest --stacktrace
+        run: timeout 5m gradle test --stacktrace
 
       - name: Build release APK
-        run: gradle assembleRelease
+        run: timeout 7m gradle assembleRelease --stacktrace
 
       - name: Verify APK is signed and installable
         shell: bash
@@ -59,9 +48,42 @@ jobs:
           test -x "$apksigner"
           "$apksigner" verify --verbose "$apk"
 
-      - name: Upload installable APK
-        uses: actions/upload-artifact@v4
+      - name: Smoke test release APK on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
         with:
-          name: cystem-install
-          path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          cores: 2
+          ram-size: 2048M
+          heap-size: 512M
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            apk="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+            test -n "$apk"
+
+            adb install -r "$apk"
+
+            adb shell am force-stop com.cystem
+            adb logcat -c
+
+            launch_output="$(adb shell am start -W -n com.cystem/.MainActivity 2>&1)"
+            printf '%s\n' "$launch_output"
+
+            sleep 5
+
+            if ! adb shell pidof com.cystem >/dev/null 2>&1; then
+              echo "CYSTEM process is not running after launch."
+              adb logcat -d
+              exit 1
+            fi
+
+            if adb logcat -d | grep -Eq 'FATAL EXCEPTION|Process: com\.cystem, PID:'; then
+              echo "CYSTEM crashed during startup."
+              adb logcat -d
+              exit 1
+            fi
+
+            adb shell am force-stop com.cystem

@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   verify:
-    runs-on: macos-15-intel
+    runs-on: macos-15
     timeout-minutes: 20
 
     steps:
@@ -52,8 +52,8 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
-          target: default
-          arch: x86_64
+          target: google_apis
+          arch: arm64-v8a
           profile: pixel_2
           cores: 2
           ram-size: 2048M
@@ -63,6 +63,9 @@ jobs:
           emulator-options: "-no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none"
           disable-animations: true
           disable-spellchecker: true
+          pre-emulator-launch-script: |
+            set -euo pipefail
+            adb start-server
           script: |
             set -euo pipefail
 

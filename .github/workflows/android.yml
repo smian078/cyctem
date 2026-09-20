@@ -37,8 +37,18 @@ jobs:
       - name: Build release APK
         run: gradle assembleRelease
 
-      - name: Upload release APK
+      - name: Verify APK is signed and installable
+        shell: bash
+        run: |
+          apk="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$apk"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "$apksigner"
+          "$apksigner" verify --verbose "$apk"
+
+      - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
-          name: cystem-release
+          name: cystem-install
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

@@ -51,30 +51,35 @@ jobs:
       - name: Smoke test release APK on Android emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
-          target: google_apis
+          api-level: 34
+          target: default
           arch: x86_64
           profile: pixel_2
           cores: 2
           ram-size: 2048M
           heap-size: 512M
+          force-avd-creation: true
+          emulator-boot-timeout: 180
+          emulator-options: "-no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none"
           disable-animations: true
+          disable-spellchecker: true
           script: |
             set -euo pipefail
+
             apk="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
             test -n "$apk"
 
-            adb install -r "$apk"
+            timeout 60s adb wait-for-device
+            timeout 90s adb install -r "$apk"
 
             adb shell am force-stop com.cystem
             adb logcat -c
 
-            launch_output="$(adb shell am start -W -n com.cystem/.MainActivity 2>&1)"
-            printf '%s\n' "$launch_output"
+            timeout 30s adb shell am start -W -n com.cystem/.MainActivity 2>&1 | tee /tmp/cystem-launch.txt
 
             sleep 5
 
-            if ! adb shell pidof com.cystem >/dev/null 2>&1; then
+            if ! timeout 15s adb shell pidof com.cystem >/dev/null 2>&1; then
               echo "CYSTEM process is not running after launch."
               adb logcat -d
               exit 1
@@ -87,3 +92,10 @@ jobs:
             fi
 
             adb shell am force-stop com.cystem
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cystem-install
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

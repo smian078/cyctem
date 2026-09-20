@@ -94,8 +94,28 @@ jobs:
               exit 1
             fi
 
+            # Exercise the same touch paths that previously caused device-side crashes.
+            # The startup overlay auto-dismisses; then exercise a neutral touch,
+            # the drawer button, and the composer/IME path.
+            adb shell input tap 540 960
+            sleep 1
+            adb shell input tap 48 72
+            sleep 1
+            adb shell input keyevent 4
+            sleep 1
+            adb shell input tap 420 1780
+            sleep 1
+            adb shell input text "smoke"
+            sleep 1
+
+            if ! adb shell pidof com.cystem >/dev/null 2>&1; then
+              echo "CYSTEM process is not running after touch interaction."
+              adb logcat -d
+              exit 1
+            fi
+
             if adb logcat -d | grep -Eq 'FATAL EXCEPTION|Process: com\.cystem, PID:'; then
-              echo "CYSTEM crashed during startup."
+              echo "CYSTEM crashed during launch/touch interaction."
               adb logcat -d
               exit 1
             fi

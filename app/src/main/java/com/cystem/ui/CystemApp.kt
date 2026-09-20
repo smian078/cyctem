@@ -720,8 +720,7 @@ private fun BootSequence(onSkip: () -> Unit) {
                         Color(0xFF07080D),
                     ),
                 ),
-            )
-
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {

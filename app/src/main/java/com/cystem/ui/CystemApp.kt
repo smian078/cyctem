@@ -97,7 +97,7 @@ private fun CystemShell(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = true,
+        // Drawer navigation remains available from the menu button; avoid installing swipe gesture handling on the root surface.
         drawerContent = {
             ConversationDrawer(
                 state = state,
@@ -721,7 +721,7 @@ private fun BootSequence(onSkip: () -> Unit) {
                     ),
                 ),
             )
-            .clickable(onClick = onSkip),
+
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -741,7 +741,7 @@ private fun BootSequence(onSkip: () -> Unit) {
             )
             Spacer(Modifier.height(28.dp))
             Text(
-                "TAP TO SKIP",
+                "STARTING…",
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
                 style = MaterialTheme.typography.labelSmall,
             )
